@@ -79,6 +79,64 @@ async def get_watchlist(
     
     return response
 
+@router.get("/search")
+async def search_tickers(
+    q: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Buscar instrumentos por nombre o ticker usando Yahoo Finance
+    """
+    import requests as req
+    import yfinance as yf
+    if not q or len(q.strip()) < 1:
+        return []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+    try:
+        # Step 1: search symbols
+        resp = req.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": q.strip(), "quotesCount": 8, "newsCount": 0, "enableFuzzyQuery": "true", "enableCb": "false"},
+            headers=headers,
+            timeout=6,
+        )
+        resp.raise_for_status()
+        quotes_raw = [item for item in resp.json().get("quotes", []) if item.get("symbol")]
+        if not quotes_raw:
+            return []
+
+        # Step 2: batch price lookup via yfinance
+        symbols = [item["symbol"] for item in quotes_raw]
+        prices: dict = {}
+        try:
+            batch = yf.Tickers(" ".join(symbols))
+            for sym in symbols:
+                try:
+                    p = getattr(batch.tickers[sym].fast_info, "last_price", None)
+                    if p is not None:
+                        prices[sym] = round(float(p), 4)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return [
+            {
+                "symbol": item["symbol"],
+                "name": item.get("longname") or item.get("shortname") or item["symbol"],
+                "exchange": item.get("exchange", ""),
+                "type": item.get("quoteType", ""),
+                "price": prices.get(item["symbol"]),
+            }
+            for item in quotes_raw
+        ]
+    except Exception:
+        return []
+
+
 @router.post("/", response_model=WatchlistResponse)
 async def add_to_watchlist(
     watchlist_item: WatchlistCreate,

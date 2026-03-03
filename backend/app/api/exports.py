@@ -87,10 +87,12 @@ async def export_stocks_csv(
         'Ticker',
         'Company Name',
         'Shares',
-        'Purchase Price',
-        'Purchase Date',
-        'Total Cost',
+        'Average Cost',
+        'Total Invested',
         'Adjusted Cost Basis',
+        'Total Premium Earned',
+        'Active',
+        'Created At',
         'Notes'
     ])
     
@@ -100,10 +102,12 @@ async def export_stocks_csv(
             stock.ticker,
             stock.company_name or '',
             stock.shares,
-            f"{stock.purchase_price:.2f}",
-            stock.purchase_date.strftime('%Y-%m-%d'),
-            f"{stock.total_cost:.2f}",
+            f"{stock.average_cost:.2f}",
+            f"{stock.total_invested:.2f}",
             f"{stock.adjusted_cost_basis:.2f}",
+            f"{stock.total_premium_earned:.2f}",
+            'Yes' if stock.is_active else 'No',
+            stock.created_at.strftime('%Y-%m-%d') if stock.created_at else '',
             stock.notes or ''
         ])
     
@@ -126,7 +130,11 @@ async def export_options_csv(
     """
     Exportar opciones a CSV
     """
-    query = db.query(Option).filter(Option.user_id == current_user.id)
+    query = (
+        db.query(Option)
+        .join(Stock, Option.stock_id == Stock.id)
+        .filter(Stock.user_id == current_user.id)
+    )
     
     if status:
         query = query.filter(Option.status == status)
@@ -165,7 +173,7 @@ async def export_options_csv(
             opt.expiration_date.strftime('%Y-%m-%d'),
             opt.contracts,
             f"{opt.premium_per_contract:.2f}",
-            f"{opt.premium:.2f}",
+            f"{opt.total_premium:.2f}",
             opt.status.value,
             opt.opened_at.strftime('%Y-%m-%d') if opt.opened_at else '',
             opt.closed_at.strftime('%Y-%m-%d') if opt.closed_at else '',
@@ -194,10 +202,15 @@ async def export_portfolio_csv(
     from ..market.market_data import MarketDataService
     
     stocks = db.query(Stock).filter(Stock.user_id == current_user.id).all()
-    options = db.query(Option).filter(
-        Option.user_id == current_user.id,
-        Option.status == OptionStatus.OPEN
-    ).all()
+    options = (
+        db.query(Option)
+        .join(Stock, Option.stock_id == Stock.id)
+        .filter(
+            Stock.user_id == current_user.id,
+            Option.status == OptionStatus.OPEN
+        )
+        .all()
+    )
     
     output = StringIO()
     writer = csv.writer(output)
@@ -220,11 +233,11 @@ async def export_portfolio_csv(
     
     for stock in stocks:
         current_price = MarketDataService.get_current_price(stock.ticker)
-        market_value = (current_price * stock.shares) if current_price else stock.total_cost
-        unrealized_pnl = market_value - stock.total_cost
-        unrealized_pnl_pct = (unrealized_pnl / stock.total_cost * 100) if stock.total_cost > 0 else 0
+        market_value = (current_price * stock.shares) if current_price else stock.total_invested
+        unrealized_pnl = market_value - stock.total_invested
+        unrealized_pnl_pct = (unrealized_pnl / stock.total_invested * 100) if stock.total_invested > 0 else 0
         
-        total_invested += stock.total_cost
+        total_invested += stock.total_invested
         total_market_value += market_value
         
         writer.writerow([
@@ -233,7 +246,7 @@ async def export_portfolio_csv(
             f"{stock.adjusted_cost_basis:.2f}",
             f"{current_price:.2f}" if current_price else 'N/A',
             f"{market_value:.2f}",
-            f"{stock.total_cost:.2f}",
+            f"{stock.total_invested:.2f}",
             f"{unrealized_pnl:.2f}",
             f"{unrealized_pnl_pct:.2f}%"
         ])
@@ -263,7 +276,7 @@ async def export_portfolio_csv(
         ticker = stock.ticker if stock else 'N/A'
         days_to_exp = (opt.expiration_date - datetime.now().date()).days
         
-        total_premium += opt.premium
+        total_premium += opt.total_premium
         
         writer.writerow([
             ticker,
@@ -271,7 +284,7 @@ async def export_portfolio_csv(
             f"{opt.strike_price:.2f}",
             opt.expiration_date.strftime('%Y-%m-%d'),
             opt.contracts,
-            f"{opt.premium:.2f}",
+            f"{opt.total_premium:.2f}",
             days_to_exp
         ])
     

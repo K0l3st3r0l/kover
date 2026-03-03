@@ -307,16 +307,19 @@ function Options() {
   if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+        <div className="animate-spin rounded-full h-10 w-10 border-2 border-blue-600 border-t-transparent"></div>
       </div>
     );
   }
 
   return (
     <>
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold text-gray-900">Mis Opciones</h1>
+    <div className="page space-y-6">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Mis Opciones</h1>
+          <p className="page-subtitle">Covered Calls y Cash Secured Puts</p>
+        </div>
         <div className="flex gap-2">
           <button
             onClick={handleExportCSV}

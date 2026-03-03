@@ -4,7 +4,7 @@ from sqlalchemy import desc
 from typing import List, Optional
 from datetime import datetime, date
 from ..database import get_db
-from ..models import Transaction, TransactionType, User
+from ..models import Transaction, TransactionType, Stock, User
 from ..utils.auth import get_current_user
 
 router = APIRouter()
@@ -61,36 +61,63 @@ async def get_transaction_summary(
     Obtener resumen de transacciones
     """
     transactions = db.query(Transaction).filter(Transaction.user_id == current_user.id).all()
-    
+
     summary = {
         "total_transactions": len(transactions),
-        "total_invested": 0,
-        "total_received": 0,
+        # Flujos históricos de acciones
+        "stock_buys": 0,        # Total pagado en compras de acciones
+        "stock_sells": 0,       # Total recibido en ventas de acciones
+        # Opciones
+        "premium_collected": 0, # Primas cobradas (SELL_CALL/SELL_PUT)
+        "premium_paid": 0,      # Primas pagadas para cerrar (BUY_CALL/BUY_PUT)
+        # Otros
+        "dividends": 0,
         "total_commissions": 0,
         "by_type": {}
     }
-    
+
     for transaction in transactions:
-        # Contar por tipo
-        type_str = transaction.transaction_type.value
+        tt = transaction.transaction_type
+        type_str = tt.value
+        amount = abs(transaction.total_amount)
+
         if type_str not in summary["by_type"]:
-            summary["by_type"][type_str] = {
-                "count": 0,
-                "total_amount": 0
-            }
-        
+            summary["by_type"][type_str] = {"count": 0, "total_amount": 0}
         summary["by_type"][type_str]["count"] += 1
-        summary["by_type"][type_str]["total_amount"] += abs(transaction.total_amount)
-        
-        # Calcular totales
+        summary["by_type"][type_str]["total_amount"] += amount
+
         summary["total_commissions"] += transaction.commission
-        
-        # Dinero gastado vs recibido
-        if transaction.transaction_type in [TransactionType.BUY_STOCK, TransactionType.BUY_CALL, TransactionType.BUY_PUT]:
-            summary["total_invested"] += abs(transaction.total_amount)
-        elif transaction.transaction_type in [TransactionType.SELL_STOCK, TransactionType.SELL_CALL, TransactionType.SELL_PUT, TransactionType.DIVIDEND]:
-            summary["total_received"] += abs(transaction.total_amount)
-    
+
+        if tt == TransactionType.BUY_STOCK:
+            summary["stock_buys"] += amount
+        elif tt == TransactionType.SELL_STOCK:
+            summary["stock_sells"] += amount
+        elif tt in (TransactionType.SELL_CALL, TransactionType.SELL_PUT):
+            summary["premium_collected"] += amount
+        elif tt in (TransactionType.BUY_CALL, TransactionType.BUY_PUT):
+            summary["premium_paid"] += amount
+        elif tt == TransactionType.DIVIDEND:
+            summary["dividends"] += amount
+
+    # Capital activo actual (igual que el dashboard)
+    active_stocks = db.query(Stock).filter(
+        Stock.user_id == current_user.id,
+        Stock.is_active == True
+    ).all()
+    summary["current_invested"] = round(sum(s.total_invested for s in active_stocks), 2)
+    summary["net_premium"] = round(summary["premium_collected"] - summary["premium_paid"], 2)
+
+    # Redondear
+    for key in ("stock_buys", "stock_sells", "premium_collected", "premium_paid",
+                "dividends", "total_commissions"):
+        summary[key] = round(summary[key], 2)
+
+    # Compat con versiones anteriores
+    summary["total_invested"] = summary["stock_buys"]
+    summary["total_received"] = round(
+        summary["stock_sells"] + summary["premium_collected"] + summary["dividends"], 2
+    )
+
     return summary
 
 @router.get("/{transaction_id}")

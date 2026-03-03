@@ -6,7 +6,7 @@ pydantic==2.5.3
 pydantic[email]==2.5.3
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
-yfinance==0.2.36
+yfinance>=1.2.0
 pandas==2.2.0
 numpy==1.26.3
 python-jose[cryptography]==3.3.0

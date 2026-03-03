@@ -12,6 +12,8 @@ class TransactionType(str, enum.Enum):
     BUY_PUT = "BUY_PUT"  # Para cerrar posición
     ASSIGNMENT = "ASSIGNMENT"  # Cuando te asignan
     DIVIDEND = "DIVIDEND"
+    DEPOSIT = "DEPOSIT"      # Depósito de efectivo a la cuenta
+    WITHDRAWAL = "WITHDRAWAL"  # Retiro de efectivo de la cuenta
 
 class Transaction(Base):
     __tablename__ = "transactions"

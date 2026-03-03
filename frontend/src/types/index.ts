@@ -68,9 +68,19 @@ export interface Transaction {
 
 export interface TransactionSummary {
   total_transactions: number;
+  // Flujos históricos
+  stock_buys: number;
+  stock_sells: number;
+  premium_collected: number;
+  premium_paid: number;
+  net_premium: number;
+  dividends: number;
+  total_commissions: number;
+  // Capital activo actual (igual que dashboard)
+  current_invested: number;
+  // Compat
   total_invested: number;
   total_received: number;
-  total_commissions: number;
   by_type: {
     [key: string]: {
       count: number;
@@ -95,19 +105,32 @@ export interface PortfolioHistory {
 
 export interface PerformanceMetrics {
   total_invested: number;
+  total_capital_deployed: number;
   current_value: number;
   total_premium: number;
+  realized_stock_pnl: number;
+  unrealized_pnl: number;
+  net_total_pnl: number;
+  roi_unrealized: number;
+  roi_net_total: number;
+  // legacy
   total_pnl: number;
   roi: number;
   best_position?: {
     ticker: string;
     pnl_pct: number;
     pnl: number;
+    current_price: number;
+    adjusted_cost_basis: number;
+    shares: number;
   };
   worst_position?: {
     ticker: string;
     pnl_pct: number;
     pnl: number;
+    current_price: number;
+    adjusted_cost_basis: number;
+    shares: number;
   };
   total_positions: number;
   active_options: number;
@@ -130,7 +153,9 @@ export interface PremiumTimelineData {
   month: string;
   calls: number;
   puts: number;
+  buybacks: number;
   total: number;
+  net: number;
 }
 
 export interface WatchlistItem {

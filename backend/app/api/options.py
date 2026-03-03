@@ -449,11 +449,22 @@ def close_option(
     option.closed_at = datetime.now()
     option.status = OptionStatus.CLOSED if close_data.closing_premium > 0 else OptionStatus.EXPIRED
     
+    # Actualizar stock: restar costo de cierre de las primas y recalcular cost basis
+    if close_data.closing_premium > 0:
+        stock = db.query(Stock).filter(Stock.id == option.stock_id).first()
+        if stock:
+            stock.total_premium_earned = max(0, stock.total_premium_earned - total_closing_cost)
+            if stock.shares > 0:
+                stock.adjusted_cost_basis = round(
+                    stock.average_cost - (stock.total_premium_earned / stock.shares), 2
+                )
+    
     # Registrar transacción si se compró para cerrar
     if close_data.closing_premium > 0:
         transaction_type = TransactionType.BUY_CALL if option.option_type == OptionType.CALL else TransactionType.BUY_PUT
         
         transaction = Transaction(
+            user_id=current_user.id,
             stock_id=option.stock_id,
             option_id=option.id,
             ticker=option.ticker,

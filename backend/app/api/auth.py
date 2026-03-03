@@ -46,6 +46,33 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
         }
     }
 
+class CashBalanceUpdate(BaseModel):
+    cash_balance: float
+
+@router.get("/cash")
+def get_cash_balance(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna el saldo de cash disponible del usuario"""
+    user = db.query(User).filter(User.id == current_user.id).first()
+    return {"cash_balance": user.cash_balance or 0.0}
+
+@router.put("/cash")
+def update_cash_balance(
+    data: CashBalanceUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Actualiza el saldo de cash disponible del usuario"""
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    user.cash_balance = data.cash_balance
+    db.commit()
+    db.refresh(user)
+    return {"cash_balance": user.cash_balance}
+
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):
     return {

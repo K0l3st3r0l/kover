@@ -69,7 +69,7 @@ function PortfolioChart({ data, height = 400 }: PortfolioChartProps) {
             dataKey="portfolio_value" 
             stroke="#3b82f6" 
             strokeWidth={3}
-            name="Portfolio Value"
+            name="Valor de Mercado"
             dot={false}
             activeDot={{ r: 6 }}
           />
@@ -79,7 +79,7 @@ function PortfolioChart({ data, height = 400 }: PortfolioChartProps) {
             stroke="#ef4444" 
             strokeWidth={2}
             strokeDasharray="5 5"
-            name="Invested"
+            name="Costo Base"
             dot={false}
           />
           <Line 
@@ -87,7 +87,7 @@ function PortfolioChart({ data, height = 400 }: PortfolioChartProps) {
             dataKey="pnl" 
             stroke="#10b981" 
             strokeWidth={2}
-            name="P&L"
+            name="P&L No Realizado"
             dot={false}
           />
         </LineChart>

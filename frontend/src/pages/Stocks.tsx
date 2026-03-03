@@ -236,19 +236,22 @@ function Stocks() {
   if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+        <div className="animate-spin rounded-full h-10 w-10 border-2 border-blue-600 border-t-transparent"></div>
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Mis Acciones</h1>
+    <div className="page space-y-6">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Mis Acciones</h1>
+          <p className="page-subtitle">Posiciones activas en renta variable</p>
+        </div>
         <div className="flex gap-2">
           <button
             onClick={() => setShowFilters(!showFilters)}
-            className={`${showFilters ? 'bg-blue-600' : 'bg-gray-600'} hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition flex items-center gap-2`}
+            className="btn btn-secondary"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />

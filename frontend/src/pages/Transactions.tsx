@@ -162,41 +162,71 @@ function Transactions() {
   }
 
   return (
-    <div className="container mx-auto p-6 max-w-7xl">
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-800 mb-2">Transaction History</h1>
-        <div className="flex justify-between items-center">
-          <p className="text-gray-600">Track all your trading activity</p>
-          <button
-            onClick={handleExportCSV}
-            className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            Export CSV
-          </button>
+    <div className="page">
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">Historial de Transacciones</h1>
+          <p className="page-subtitle">Registro completo de tu actividad de trading</p>
         </div>
+        <button
+          onClick={handleExportCSV}
+          className="btn btn-sm bg-green-600 hover:bg-green-700 text-white"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+          </svg>
+          Export CSV
+        </button>
       </div>
 
-      {/* Summary Cards */}
       {summary && (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600 mb-1">Total Transactions</p>
-            <p className="text-2xl font-bold text-gray-800">{summary.total_transactions}</p>
+        <div className="space-y-4 mb-6">
+          {/* Fila 1: Vista actual (igual que dashboard) */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Operaciones</p>
+              <p className="text-2xl font-bold text-gray-800 dark:text-gray-100">{summary.total_transactions}</p>
+            </div>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Capital Activo</p>
+              <p className="text-sm text-gray-400 mb-1">Posiciones abiertas actuales</p>
+              <p className="text-2xl font-bold text-blue-600">{formatCurrency(summary.current_invested)}</p>
+            </div>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Primas Netas</p>
+              <p className="text-sm text-gray-400 mb-1">
+                Cobradas {formatCurrency(summary.premium_collected)} &minus; Pagadas {formatCurrency(summary.premium_paid)}
+              </p>
+              <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.net_premium)}</p>
+            </div>
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Comisiones Totales</p>
+              <p className="text-2xl font-bold text-orange-600">{formatCurrency(summary.total_commissions)}</p>
+            </div>
           </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600 mb-1">Total Invested</p>
-            <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.total_invested)}</p>
-          </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600 mb-1">Total Received</p>
-            <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.total_received)}</p>
-          </div>
-          <div className="bg-white rounded-lg shadow p-4">
-            <p className="text-sm text-gray-600 mb-1">Total Commissions</p>
-            <p className="text-2xl font-bold text-orange-600">{formatCurrency(summary.total_commissions)}</p>
+          {/* Fila 2: Flujos históricos */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Comprado (Histórico)</p>
+              <p className="text-xs text-gray-400 mb-1">Suma de todas las compras, incl. ya vendidas</p>
+              <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.stock_buys)}</p>
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Vendido (Histórico)</p>
+              <p className="text-xs text-gray-400 mb-1">Proceeds de todas las ventas</p>
+              <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.stock_sells)}</p>
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Flujo Neto de Caja</p>
+              <p className="text-xs text-gray-400 mb-1">Lo que salió de tu bolsillo en total</p>
+              <p className={`text-2xl font-bold ${summary.stock_buys - summary.stock_sells >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                {formatCurrency(summary.stock_buys - summary.stock_sells)}
+              </p>
+            </div>
+            <div className="bg-white rounded-lg shadow p-4">
+              <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Dividendos Cobrados</p>
+              <p className="text-2xl font-bold text-blue-500">{formatCurrency(summary.dividends)}</p>
+            </div>
           </div>
         </div>
       )}
