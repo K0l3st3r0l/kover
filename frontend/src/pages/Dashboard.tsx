@@ -307,7 +307,7 @@ function Dashboard() {
             Tax Report
           </button>
           <button 
-            onClick={fetchSummary}
+            onClick={() => { fetchSummary(); fetchAnalytics(); fetchCash(); }}
             className="text-sm px-3 py-2 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium"
           >
             🔄 Actualizar

@@ -88,18 +88,24 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
         except ValueError:
             continue  # skip header / metadata rows
 
-        # Collect "Valor Cuota" columns (indices 1, 3, 5, ... – every 2nd from 1)
+        # Collect "Valor Cuota" (odd cols: 1, 3, 5…) and "Patrimonio" (even cols: 2, 4, 6…)
         cuotas = []
+        patrimonios = []
         for i in range(1, len(parts), 2):
             val = _parse_cl_number(parts[i])
             if val is not None and val > 0:
                 cuotas.append(val)
+            if i + 1 < len(parts):
+                pat = _parse_cl_number(parts[i + 1])
+                if pat is not None and pat > 0:
+                    patrimonios.append(pat)
 
         if cuotas:
             records.append({
                 "date": date,
                 "date_str": date.strftime("%Y-%m-%d"),
                 "avg_value": sum(cuotas) / len(cuotas),
+                "total_patrimonio": sum(patrimonios) if patrimonios else 0.0,
             })
 
     records.sort(key=lambda x: x["date"])
@@ -129,6 +135,28 @@ def _filter_by_period(records: list, days: int) -> list:
         return records
     cutoff = records[-1]["date"] - timedelta(days=days)
     return [r for r in records if r["date"] >= cutoff]
+
+
+def _compute_obv(records: list) -> list:
+    """
+    On-Balance Volume using total_patrimonio as proxy for volume.
+    OBV rises when cuota closes higher, falls when it closes lower.
+    """
+    if not records:
+        return records
+    result = []
+    obv = 0.0
+    prev_value = None
+    for r in records:
+        pat = r.get("total_patrimonio", 0.0)
+        if prev_value is not None:
+            if r["avg_value"] > prev_value:
+                obv += pat
+            elif r["avg_value"] < prev_value:
+                obv -= pat
+        prev_value = r["avg_value"]
+        result.append({**r, "obv": round(obv, 0)})
+    return result
 
 
 @router.get("/afp-funds")
@@ -173,7 +201,8 @@ def get_afp_funds(
             errors.append(fund_letter)
             continue
 
-        normalized = _normalize_series(filtered)
+        with_obv = _compute_obv(filtered)
+        normalized = _normalize_series(with_obv)
 
         result[fund_letter] = {
             "color": FUND_COLORS[fund_letter],
@@ -183,6 +212,8 @@ def get_afp_funds(
                     "date": r["date_str"],
                     "value": r["normalized"],
                     "raw_value": round(r["avg_value"], 2),
+                    "patrimonio": round(r.get("total_patrimonio", 0.0), 0),
+                    "obv": r.get("obv", 0.0),
                 }
                 for r in normalized
             ],
