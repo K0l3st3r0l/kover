@@ -1,0 +1,66 @@
+# Dependencias (El mayor gasto de tokens)
+node_modules/
+bower_components/
+vendor/
+
+# Lock files (Enormes e inútiles de leer)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+composer.lock
+
+# Archivos de Compilación y Build
+dist/
+build/
+.next/
+.nuxt/
+out/
+.cache/
+coverage/
+*.pyc
+__pycache__/
+
+# Docker e Infraestructura (Logs pesados)
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.docker/
+
+# Base de Datos (Nunca dejes que Claude lea dumps gigantes)
+*.sql
+*.sqlite
+*.dump
+postgres-data/
+data/
+
+# Archivos subidos por usuarios
+uploads/
+
+# Certificados y claves (Seguridad)
+letsencrypt/
+*.pem
+*.key
+*.cert
+*.crt
+
+# Variables de Entorno (Por Seguridad y para no ensuciar contexto)
+.env
+.env.*
+!.env.example
+
+# Archivos minificados (Generados, no fuente)
+*.min.js
+*.min.css
+
+# Archivos de Sistema y Editores
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Git y Otros
+.git/
+.svn/
+.hg/

@@ -7,6 +7,7 @@ from ..database import get_db
 from ..models import Option, Stock, OptionType, OptionStrategy, OptionStatus, Transaction, TransactionType
 from ..models.user import User
 from ..utils.auth import get_current_user
+from ..market import MarketDataService
 from ..utils import OptionsCalculator
 
 router = APIRouter()
@@ -41,6 +42,7 @@ class OptionResponse(BaseModel):
     days_to_expiration: Optional[int] = None
     premium_yield: Optional[float] = None
     annualized_return: Optional[float] = None
+    current_price: Optional[float] = None
 
     class Config:
         from_attributes = True
@@ -174,11 +176,16 @@ def get_expiring_soon_options(
         Option.expiration_date >= datetime.now()
     ).order_by(Option.expiration_date).all()
     
-    # Enriquecer con días hasta expiración
+    # Obtener precios actuales
+    tickers = list(set([opt.ticker for opt in options]))
+    prices = MarketDataService.get_multiple_prices(tickers)
+    
+    # Enriquecer con días hasta expiración y precios
     result = []
     for option in options:
         response = OptionResponse.from_orm(option)
         _enrich_response(response, option)
+        response.current_price = prices.get(option.ticker)
         result.append(response)
     
     return result
