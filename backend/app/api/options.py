@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import cast, Date
 from typing import List, Optional
 from pydantic import BaseModel
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ..database import get_db
 from ..models import Option, Stock, OptionType, OptionStrategy, OptionStatus, Transaction, TransactionType
 from ..models.user import User
@@ -138,18 +139,37 @@ def create_option(
     
     return response
 
+def _auto_expire_options(db: Session, user_id: int):
+    """Marca como EXPIRED las opciones OPEN cuya fecha de expiración ya pasó."""
+    today = datetime.now(timezone.utc).date()
+    expired = db.query(Option).join(Stock).filter(
+        Stock.user_id == user_id,
+        Option.status == OptionStatus.OPEN,
+        cast(Option.expiration_date, Date) < today
+    ).all()
+    if expired:
+        for opt in expired:
+            opt.status = OptionStatus.EXPIRED
+            opt.closed_at = opt.expiration_date
+            if opt.realized_pnl is None:
+                opt.realized_pnl = opt.total_premium  # expiró sin valor → prima completa ganada
+        db.commit()
+
+
 @router.get("/", response_model=List[OptionResponse])
 def get_options(
-    status: OptionStatus = None, 
+    status: OptionStatus = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Obtener todas las opciones"""
+    _auto_expire_options(db, current_user.id)
+
     # Filtrar por opciones del usuario a través de la relación con stocks
     query = db.query(Option).join(Stock).filter(Stock.user_id == current_user.id)
     if status:
         query = query.filter(Option.status == status)
-    
+
     options = query.order_by(Option.expiration_date.desc()).all()
     
     results = []
@@ -167,18 +187,25 @@ def get_expiring_soon_options(
     current_user: User = Depends(get_current_user)
 ):
     """Obtener opciones que expiran pronto (por defecto en 7 días o menos)"""
-    cutoff_date = datetime.now() + timedelta(days=days)
-    
+    _auto_expire_options(db, current_user.id)
+    today = datetime.now(timezone.utc).date()
+    cutoff_date = today + timedelta(days=days)
+
     options = db.query(Option).join(Stock).filter(
         Stock.user_id == current_user.id,
         Option.status == OptionStatus.OPEN,
-        Option.expiration_date <= cutoff_date,
-        Option.expiration_date >= datetime.now()
+        cast(Option.expiration_date, Date) >= today,
+        cast(Option.expiration_date, Date) <= cutoff_date
     ).order_by(Option.expiration_date).all()
-    
-    # Obtener precios actuales
-    tickers = list(set([opt.ticker for opt in options]))
-    prices = MarketDataService.get_multiple_prices(tickers)
+
+    # Obtener precios actuales (con fallback seguro)
+    prices = {}
+    try:
+        tickers = list(set([opt.ticker for opt in options]))
+        if tickers:
+            prices = MarketDataService.get_multiple_prices(tickers)
+    except Exception as e:
+        print(f"[expiring-soon] price fetch error: {e}")
     
     # Enriquecer con días hasta expiración y precios
     result = []
