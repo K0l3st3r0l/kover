@@ -29,6 +29,10 @@ services:
       - "8001:8000"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-kover}
+      SECRET_KEY: ${SECRET_KEY:-changeme}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    volumes:
+      - ./backend/cache:/app/cache
     depends_on:
       db:
         condition: service_healthy

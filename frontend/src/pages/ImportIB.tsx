@@ -53,17 +53,30 @@ const TIPO_COLORS: Record<string, string> = {
   ASSIGNMENT: 'text-gray-500',
 }
 
+const getTodayISO = () => {
+  const today = new Date()
+  const year = today.getFullYear()
+  const month = `${today.getMonth() + 1}`.padStart(2, '0')
+  const day = `${today.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 // ─── Componente ───────────────────────────────────────────────────────────────
 
 type Step = 'upload' | 'preview' | 'done'
+type InputMode = 'csv' | 'manual'
 
 export default function ImportIB() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [step, setStep] = useState<Step>('upload')
+  const [inputMode, setInputMode] = useState<InputMode>('csv')
+  const [previewSource, setPreviewSource] = useState<InputMode>('csv')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [preview, setPreview] = useState<PreviewResponse | null>(null)
   const [result, setResult] = useState<ImportResult | null>(null)
+  const [manualText, setManualText] = useState('')
+  const [manualTradeDate, setManualTradeDate] = useState(getTodayISO)
   const [omitirDuplicados, setOmitirDuplicados] = useState(true)
   const [showErrors, setShowErrors] = useState(false)
   const [filterTipo, setFilterTipo] = useState('all')
@@ -76,6 +89,17 @@ export default function ImportIB() {
     posiciones_cerradas: string[]
     total_transacciones_procesadas: number
   } | null>(null)
+
+  const resetPreviewFlow = () => {
+    setStep('upload')
+    setPreview(null)
+    setResult(null)
+    setError('')
+    setShowErrors(false)
+    setFilterTipo('all')
+    setShowOnlyNew(true)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
 
   // ── Paso 1: subir archivo y obtener preview ──────────────────────────────
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -93,10 +117,36 @@ export default function ImportIB() {
       const res = await api.post<PreviewResponse>('/api/import-ib/preview', formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       })
+      setPreviewSource('csv')
       setPreview(res.data)
       setStep('preview')
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'Error al procesar el archivo. Verifica que sea un Activity Statement de IB en formato CSV.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleManualPreview = async () => {
+    if (!manualText.trim()) {
+      setError('Pega al menos una operación desde la pestaña Trades de IBKR.')
+      return
+    }
+
+    setLoading(true)
+    setError('')
+    setPreview(null)
+
+    try {
+      const res = await api.post<PreviewResponse>('/api/import-ib/preview-manual', {
+        raw_text: manualText,
+        trade_date: manualTradeDate,
+      })
+      setPreviewSource('manual')
+      setPreview(res.data)
+      setStep('preview')
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Error al procesar el texto pegado. Revisa el formato copiado desde Trades.')
     } finally {
       setLoading(false)
     }
@@ -153,66 +203,159 @@ export default function ImportIB() {
             📥 Importar desde Interactive Brokers
           </h1>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Sube tu Activity Statement en CSV para importar automáticamente todas tus operaciones.
+            Importa operaciones desde el Activity Statement en CSV o pegando directamente trades del día desde Client Portal.
           </p>
         </div>
 
-        {/* Instrucciones */}
-        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
-          <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
-            📋 Cómo exportar desde Interactive Brokers
-          </h2>
-          <ol className="space-y-2 text-sm text-blue-700 dark:text-blue-300">
-            <li className="flex gap-2">
-              <span className="font-bold flex-shrink-0">1.</span>
-              <span>Inicia sesión en <strong>IB Client Portal</strong> (clientportal.ibkr.com)</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="font-bold flex-shrink-0">2.</span>
-              <span>Ve a <strong>Reports → Activity → Statements</strong></span>
-            </li>
-            <li className="flex gap-2">
-              <span className="font-bold flex-shrink-0">3.</span>
-              <span>Selecciona tipo <strong>Activity</strong>, período: el <strong>año completo</strong> que deseas importar</span>
-            </li>
-            <li className="flex gap-2">
-              <span className="font-bold flex-shrink-0">4.</span>
-              <span>Formato: <strong>CSV</strong> → Click en <strong>Download</strong></span>
-            </li>
-            <li className="flex gap-2">
-              <span className="font-bold flex-shrink-0">5.</span>
-              <span>Sube el archivo descargado aquí abajo</span>
-            </li>
-          </ol>
-          <div className="mt-4 p-3 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-xs text-blue-600 dark:text-blue-400">
-            ✅ Se importan: <strong>Compras y ventas de acciones</strong>, <strong>primas de opciones (Calls y Puts)</strong>, <strong>cierres de opciones</strong>, <strong>dividendos</strong> y <strong>asignaciones</strong>.<br />
-            ❌ Se ignoran: Forex, Bonds, divisas, filas de totales y subtotales.
+        <div className="inline-flex rounded-xl bg-gray-100 dark:bg-gray-800 p-1 gap-1 w-full sm:w-auto">
+          <button
+            onClick={() => { setInputMode('csv'); setError('') }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+              inputMode === 'csv'
+                ? 'bg-white dark:bg-gray-700 text-blue-700 dark:text-blue-300 shadow'
+                : 'text-gray-600 dark:text-gray-300'
+            }`}
+          >
+            CSV oficial de IB
+          </button>
+          <button
+            onClick={() => { setInputMode('manual'); setError('') }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+              inputMode === 'manual'
+                ? 'bg-white dark:bg-gray-700 text-blue-700 dark:text-blue-300 shadow'
+                : 'text-gray-600 dark:text-gray-300'
+            }`}
+          >
+            Pegado manual de Trades
+          </button>
+        </div>
+
+        {inputMode === 'csv' ? (
+          <>
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
+              <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
+                📋 Cómo exportar desde Interactive Brokers
+              </h2>
+              <ol className="space-y-2 text-sm text-blue-700 dark:text-blue-300">
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">1.</span>
+                  <span>Inicia sesión en <strong>IB Client Portal</strong> (clientportal.ibkr.com)</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">2.</span>
+                  <span>Ve a <strong>Reports → Activity → Statements</strong></span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">3.</span>
+                  <span>Selecciona tipo <strong>Activity</strong>, período: el <strong>año completo</strong> que deseas importar</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">4.</span>
+                  <span>Formato: <strong>CSV</strong> → Click en <strong>Download</strong></span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">5.</span>
+                  <span>Sube el archivo descargado aquí abajo</span>
+                </li>
+              </ol>
+              <div className="mt-4 p-3 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-xs text-blue-600 dark:text-blue-400">
+                ✅ Se importan: <strong>Compras y ventas de acciones</strong>, <strong>primas de opciones (Calls y Puts)</strong>, <strong>cierres de opciones</strong>, <strong>dividendos</strong> y <strong>asignaciones</strong>.<br />
+                ❌ Se ignoran: Forex, Bonds, divisas, filas de totales y subtotales.
+              </div>
+            </div>
+
+            <div
+              className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl p-12 text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition-colors"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div className="text-5xl mb-3">📄</div>
+              <p className="text-lg font-medium text-gray-700 dark:text-gray-300">
+                Haz click para seleccionar el archivo CSV
+              </p>
+              <p className="text-sm text-gray-400 mt-1">o arrastra y suelta aquí</p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </div>
+          </>
+        ) : (
+          <div className="space-y-4">
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
+              <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
+                📋 Cómo pegar trades del día desde Client Portal
+              </h2>
+              <ol className="space-y-2 text-sm text-blue-700 dark:text-blue-300">
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">1.</span>
+                  <span>Abre <strong>Orders &amp; Trades → Trades</strong> en IB Client Portal.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">2.</span>
+                  <span>Selecciona una o varias filas ejecutadas y copia con <strong>Ctrl+C</strong>.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold flex-shrink-0">3.</span>
+                  <span>Pega el bloque aquí abajo e indica la <strong>fecha real</strong> de esas operaciones.</span>
+                </li>
+              </ol>
+              <div className="mt-4 p-3 bg-blue-100 dark:bg-blue-900/40 rounded-lg text-xs text-blue-600 dark:text-blue-400">
+                Usa este modo para operaciones del día que todavía no aparecen en el CSV. Si pegas operaciones de fechas distintas, impórtalas en bloques separados.
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 space-y-4">
+              <div className="grid gap-4 sm:grid-cols-[220px_1fr] sm:items-end">
+                <label className="block space-y-1.5">
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Fecha de la sesión</span>
+                  <input
+                    type="date"
+                    value={manualTradeDate}
+                    onChange={e => setManualTradeDate(e.target.value)}
+                    className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-sm text-gray-800 dark:text-white"
+                  />
+                </label>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  La tabla visible de IBKR normalmente muestra solo la hora. Esta fecha se usará para construir la operación completa en tu historial.
+                </p>
+              </div>
+
+              <label className="block space-y-1.5">
+                <span className="text-sm font-medium text-gray-700 dark:text-gray-200">Texto copiado desde Trades</span>
+                <textarea
+                  value={manualText}
+                  onChange={e => setManualText(e.target.value)}
+                  rows={12}
+                  placeholder={"F May15'26 12 Call\nSold 1 @ 0.26 on CBOE\nU7013196\nSold\n1\nFilled\n9:42\n0,26\n26\nComisiones: 1.05"}
+                  className="w-full rounded-xl border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-900 px-4 py-3 text-sm text-gray-800 dark:text-gray-100 font-mono"
+                />
+              </label>
+
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  El parser acepta bloques copiados con tabs, saltos de línea y comisiones en español o inglés.
+                </p>
+                <button
+                  onClick={handleManualPreview}
+                  disabled={loading || !manualTradeDate}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg transition"
+                >
+                  🔍 Analizar texto pegado
+                </button>
+              </div>
+            </div>
           </div>
-        </div>
-
-        {/* Zona de upload */}
-        <div
-          className="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl p-12 text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-500 transition-colors"
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <div className="text-5xl mb-3">📄</div>
-          <p className="text-lg font-medium text-gray-700 dark:text-gray-300">
-            Haz click para seleccionar el archivo CSV
-          </p>
-          <p className="text-sm text-gray-400 mt-1">o arrastra y suelta aquí</p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv"
-            onChange={handleFileUpload}
-            className="hidden"
-          />
-        </div>
+        )}
 
         {loading && (
           <div className="flex items-center justify-center gap-3 py-4">
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />
-            <span className="text-gray-600 dark:text-gray-300">Analizando el archivo...</span>
+            <span className="text-gray-600 dark:text-gray-300">
+              {inputMode === 'manual' ? 'Analizando el texto pegado...' : 'Analizando el archivo...'}
+            </span>
           </div>
         )}
 
@@ -326,10 +469,10 @@ export default function ImportIB() {
             Ver Informe Fiscal →
           </a>
           <button
-            onClick={() => { setStep('upload'); setPreview(null); setResult(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+            onClick={resetPreviewFlow}
             className="bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-200 font-semibold px-6 py-2 rounded-lg transition"
           >
-            Importar otro archivo
+            Importar más operaciones
           </button>
         </div>
       </div>
@@ -340,6 +483,7 @@ export default function ImportIB() {
   if (!preview) return null
 
   const tiposUnicos = [...new Set(preview.transacciones.map(t => t.tipo))]
+  const sourceRowsLabel = previewSource === 'manual' ? 'Bloques pegados' : 'Filas en CSV'
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
@@ -354,17 +498,17 @@ export default function ImportIB() {
           </p>
         </div>
         <button
-          onClick={() => { setStep('upload'); setPreview(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}
+          onClick={resetPreviewFlow}
           className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 underline"
         >
-          ← Cambiar archivo
+          ← Cambiar fuente
         </button>
       </div>
 
       {/* Tarjetas resumen */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: 'Filas en CSV', val: preview.total_filas_csv, icon: '📄', color: 'border-gray-300' },
+          { label: sourceRowsLabel, val: preview.total_filas_csv, icon: '📄', color: 'border-gray-300' },
           { label: 'Para importar', val: preview.total_importables, icon: '✅', color: 'border-green-400' },
           { label: 'Duplicados', val: preview.total_duplicados, icon: '🔁', color: 'border-yellow-400' },
           { label: 'Advertencias', val: preview.total_advertencias, icon: '⚠️', color: 'border-orange-400' },

@@ -1,5 +1,8 @@
+import json
 import logging
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -13,6 +16,8 @@ router = APIRouter()
 # -- Superintendencia de Pensiones de Chile (public) --------------------------
 SP_XLS_URL = "https://www.spensiones.cl/apps/valoresCuotaFondo/vcfAFPxls.php"
 SP_REFERER = "https://www.spensiones.cl/apps/valoresCuotaFondo/vcfAFP.php"
+
+AFP_CACHE_DIR = Path(os.getenv("AFP_CACHE_DIR", "/app/cache/afp"))
 
 FUND_TYPES = ["A", "B", "C", "D", "E"]
 
@@ -41,6 +46,36 @@ def _parse_cl_number(s: str) -> Optional[float]:
         return None
 
 
+def _cache_path(fund: str) -> Path:
+    return AFP_CACHE_DIR / f"fund_{fund}.json"
+
+
+def _save_afp_cache(fund: str, records: list) -> None:
+    try:
+        AFP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        serializable = [
+            {**{k: v for k, v in r.items() if k != "date"}, "date": r["date"].isoformat()}
+            for r in records
+        ]
+        _cache_path(fund).write_text(json.dumps(serializable), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"AFP cache write failed for {fund}: {e}")
+
+
+def _load_afp_cache(fund: str) -> list:
+    try:
+        path = _cache_path(fund)
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for r in data:
+            r["date"] = datetime.fromisoformat(r["date"])
+        return data
+    except Exception as e:
+        logger.warning(f"AFP cache read failed for {fund}: {e}")
+        return []
+
+
 def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
     """
     Fetch CSV from SP and return list of {date, avg_value} sorted ascending.
@@ -60,60 +95,71 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
         "tf": fund,
         "fecconf": fecconf,
     }
+    fetch_ok = False
+    records = []
+
     try:
         resp = requests.get(SP_XLS_URL, params=params, headers=headers, timeout=30)
         resp.raise_for_status()
+        fetch_ok = True
     except Exception as e:
         logger.warning(f"Error fetching fund {fund}: {e}")
-        return []
 
-    try:
-        text = resp.content.decode("latin-1")
-    except Exception:
-        text = resp.text
-
-    records = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(";")
-        if len(parts) < 3:
-            continue
-
-        # Date field must be YYYY-MM-DD
-        date_str = parts[0].strip()
+    if fetch_ok:
         try:
-            date = datetime.strptime(date_str, "%Y-%m-%d")
-        except ValueError:
-            continue  # skip header / metadata rows
+            text = resp.content.decode("latin-1")
+        except Exception:
+            text = resp.text
 
-        # Collect "Valor Cuota" (odd cols: 1, 3, 5…) and "Patrimonio" (even cols: 2, 4, 6…)
-        cuotas = []
-        patrimonios = []
-        for i in range(1, len(parts), 2):
-            val = _parse_cl_number(parts[i])
-            if val is not None and val > 0:
-                cuotas.append(val)
-            if i + 1 < len(parts):
-                pat = _parse_cl_number(parts[i + 1])
-                if pat is not None and pat > 0:
-                    patrimonios.append(pat)
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(";")
+            if len(parts) < 3:
+                continue
 
-        if cuotas:
-            records.append({
-                "date": date,
-                "date_str": date.strftime("%Y-%m-%d"),
-                "avg_value": sum(cuotas) / len(cuotas),
-                "total_patrimonio": sum(patrimonios) if patrimonios else 0.0,
-            })
+            date_str = parts[0].strip()
+            try:
+                date = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
 
-    records.sort(key=lambda x: x["date"])
-    # Deduplicate: keep last entry per day
-    seen = {}
-    for r in records:
-        seen[r["date_str"]] = r
-    return sorted(seen.values(), key=lambda x: x["date"])
+            cuotas = []
+            patrimonios = []
+            for i in range(1, len(parts), 2):
+                val = _parse_cl_number(parts[i])
+                if val is not None and val > 0:
+                    cuotas.append(val)
+                if i + 1 < len(parts):
+                    pat = _parse_cl_number(parts[i + 1])
+                    if pat is not None and pat > 0:
+                        patrimonios.append(pat)
+
+            if cuotas:
+                records.append({
+                    "date": date,
+                    "date_str": date.strftime("%Y-%m-%d"),
+                    "avg_value": sum(cuotas) / len(cuotas),
+                    "total_patrimonio": sum(patrimonios) if patrimonios else 0.0,
+                })
+
+        records.sort(key=lambda x: x["date"])
+        seen = {}
+        for r in records:
+            seen[r["date_str"]] = r
+        records = sorted(seen.values(), key=lambda x: x["date"])
+
+        if records:
+            _save_afp_cache(fund, records)
+            return records, False
+
+    cached = _load_afp_cache(fund)
+    if cached:
+        logger.info(f"Serving fund {fund} from disk cache (source unavailable)")
+        return cached, True
+
+    return [], False
 
 
 def _normalize_series(records: list) -> list:
@@ -159,6 +205,62 @@ def _compute_obv(records: list) -> list:
     return result
 
 
+# -- mindicador.cl (public, no auth) ------------------------------------------
+MINDICADOR_BASE = "https://mindicador.cl/api"
+
+MACRO_INDICATORS = {
+    "tpm":            {"label": "TPM Banco Central",   "unit": "%",    "freq": "diaria"},
+    "ipc":            {"label": "IPC (var. mensual)",  "unit": "%",    "freq": "mensual"},
+    "libra_cobre":    {"label": "Cobre (USD/lb)",      "unit": "USD",  "freq": "diaria"},
+    "uf":             {"label": "UF",                  "unit": "CLP",  "freq": "diaria"},
+    "tasa_desempleo": {"label": "Tasa de Desempleo",   "unit": "%",    "freq": "trimestral"},
+    "imacec":         {"label": "IMACEC",              "unit": "%",    "freq": "mensual"},
+}
+
+
+def _fetch_mindicador(indicator: str, years: list[int]) -> list:
+    records: dict[str, float] = {}
+    for year in years:
+        try:
+            r = requests.get(f"{MINDICADOR_BASE}/{indicator}/{year}", timeout=10)
+            r.raise_for_status()
+            for item in r.json().get("serie", []):
+                date_str = item["fecha"][:10]
+                records[date_str] = item["valor"]
+        except Exception as e:
+            logger.warning(f"mindicador {indicator}/{year}: {e}")
+    return sorted(
+        [{"date": k, "value": v} for k, v in records.items()],
+        key=lambda x: x["date"],
+    )
+
+
+@router.get("/macro-cl")
+def get_macro_chile():
+    """
+    Returns macro indicators for Chile: TPM, IPC, copper price.
+    Data sourced from mindicador.cl (public API, no auth required).
+    """
+    today = datetime.today()
+    years = [today.year - 3, today.year - 2, today.year - 1, today.year]
+
+    result = {}
+    for key, meta in MACRO_INDICATORS.items():
+        data = _fetch_mindicador(key, years)
+        latest = data[-1] if data else None
+        prev   = data[-2] if len(data) >= 2 else None
+        result[key] = {
+            "label":   meta["label"],
+            "unit":    meta["unit"],
+            "freq":    meta["freq"],
+            "data":    data,
+            "latest":  latest,
+            "change":  round(latest["value"] - prev["value"], 4) if latest and prev else None,
+        }
+
+    return JSONResponse(content={"indicators": result, "source": "mindicador.cl"})
+
+
 @router.get("/afp-funds")
 def get_afp_funds(
     days: int = Query(
@@ -189,12 +291,16 @@ def get_afp_funds(
 
     result = {}
     errors = []
+    any_from_cache = False
 
     for fund_letter in requested:
-        raw = _fetch_fund_data(fund_letter, year_start, year_end)
+        raw, from_cache = _fetch_fund_data(fund_letter, year_start, year_end)
         if not raw:
             errors.append(fund_letter)
             continue
+
+        if from_cache:
+            any_from_cache = True
 
         filtered = _filter_by_period(raw, days)
         if not filtered:
@@ -230,6 +336,7 @@ def get_afp_funds(
             "funds": result,
             "period_days": days,
             "errors": errors,
+            "from_cache": any_from_cache,
             "source": "Superintendencia de Pensiones de Chile",
         }
     )

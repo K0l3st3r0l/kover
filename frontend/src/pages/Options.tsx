@@ -147,10 +147,11 @@ function Options() {
     }
   };
 
-  const handleClose = async (id: number, closingPremium: number) => {
+  const handleClose = async (id: number, closingPremium: number, contractsToClose?: number) => {
     try {
       await api.post(`/api/options/${id}/close`, {
-        closing_premium: closingPremium
+        closing_premium: closingPremium,
+        ...(contractsToClose !== undefined && { contracts_to_close: contractsToClose }),
       });
       fetchData();
     } catch (error) {
@@ -269,12 +270,12 @@ function Options() {
 
   const getStatusBadge = (status: string) => {
     const styles = {
-      OPEN: 'bg-blue-100 text-blue-800',
-      CLOSED: 'bg-gray-100 text-gray-800',
-      EXPIRED: 'bg-green-100 text-green-800',
-      ASSIGNED: 'bg-yellow-100 text-yellow-800'
+      OPEN: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300',
+      CLOSED: 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300',
+      EXPIRED: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300',
+      ASSIGNED: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300'
     };
-    return styles[status as keyof typeof styles] || 'bg-gray-100 text-gray-800';
+    return styles[status as keyof typeof styles] || 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
   };
 
   const handleExportCSV = async () => {
@@ -349,8 +350,8 @@ function Options() {
       )}
 
       {showForm && stocks.length > 0 && (
-        <div className="bg-white rounded-lg shadow-md p-6">
-          <h2 className="text-xl font-semibold mb-4">Nueva Opción</h2>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+          <h2 className="text-xl font-semibold mb-4 text-gray-900 dark:text-gray-100">Nueva Opción</h2>
           <form onSubmit={handleSubmit} className="space-y-4">
             {formError && (
               <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
@@ -360,14 +361,14 @@ function Options() {
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Acción *
                 </label>
                 <select
                   required
                   value={formData.stock_id}
                   onChange={(e) => setFormData({ ...formData, stock_id: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 >
                   <option value="">Seleccionar...</option>
                   {stocks.map(stock => (
@@ -379,7 +380,7 @@ function Options() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Estrategia *
                 </label>
                 <select
@@ -393,7 +394,7 @@ function Options() {
                       option_type: strategy === 'COVERED_CALL' ? 'CALL' : 'PUT'
                     });
                   }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 >
                   <option value="COVERED_CALL">Covered Call</option>
                   <option value="CASH_SECURED_PUT">Cash Secured Put</option>
@@ -401,7 +402,7 @@ function Options() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Strike Price *
                 </label>
                 <input
@@ -411,13 +412,13 @@ function Options() {
                   min="0"
                   value={formData.strike_price}
                   onChange={(e) => setFormData({ ...formData, strike_price: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   placeholder="100.00"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Contratos *
                 </label>
                 <input
@@ -426,13 +427,13 @@ function Options() {
                   min="1"
                   value={formData.contracts}
                   onChange={(e) => setFormData({ ...formData, contracts: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   placeholder="1"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Prima por Contrato *
                 </label>
                 <input
@@ -442,13 +443,13 @@ function Options() {
                   min="0"
                   value={formData.premium_per_contract}
                   onChange={(e) => setFormData({ ...formData, premium_per_contract: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   placeholder="2.50"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Fecha de Expiración *
                 </label>
                 <input
@@ -456,25 +457,25 @@ function Options() {
                   required
                   value={formData.expiration_date}
                   onChange={(e) => setFormData({ ...formData, expiration_date: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Fecha de Apertura <span className="text-gray-400 font-normal">(opcional — si fue antes de hoy)</span>
                 </label>
                 <input
                   type="date"
                   value={formData.opened_at}
                   onChange={(e) => setFormData({ ...formData, opened_at: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
               </div>
             </div>
 
             {formData.contracts && formData.premium_per_contract && (
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-                <p className="text-sm text-blue-800">
+              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-lg p-4">
+                <p className="text-sm text-blue-800 dark:text-blue-300">
                   Prima Total: <span className="font-bold">
                     ${(parseInt(formData.contracts || '0') * parseFloat(formData.premium_per_contract || '0') * 100).toFixed(2)}
                   </span>
@@ -490,7 +491,7 @@ function Options() {
                 value={formData.notes}
                 onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                 rows={3}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 placeholder="Notas adicionales..."
               />
             </div>
@@ -499,7 +500,7 @@ function Options() {
               <button
                 type="button"
                 onClick={() => setShowForm(false)}
-                className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 transition"
+                className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition dark:text-gray-300"
               >
                 Cancelar
               </button>
@@ -521,7 +522,7 @@ function Options() {
           className={`px-4 py-2 rounded-lg transition ${
             filter === 'ALL' 
               ? 'bg-blue-600 text-white' 
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+              : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
           }`}
         >
           Todas
@@ -529,9 +530,9 @@ function Options() {
         <button
           onClick={() => setFilter('OPEN')}
           className={`px-4 py-2 rounded-lg transition ${
-            filter === 'OPEN' 
-              ? 'bg-blue-600 text-white' 
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+            filter === 'OPEN'
+              ? 'bg-blue-600 text-white'
+              : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
           }`}
         >
           Abiertas
@@ -539,9 +540,9 @@ function Options() {
         <button
           onClick={() => setFilter('CLOSED')}
           className={`px-4 py-2 rounded-lg transition ${
-            filter === 'CLOSED' 
-              ? 'bg-blue-600 text-white' 
-              : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+            filter === 'CLOSED'
+              ? 'bg-blue-600 text-white'
+              : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
           }`}
         >
           Cerradas
@@ -549,8 +550,8 @@ function Options() {
       </div>
 
       {filteredOptions.length === 0 ? (
-        <div className="bg-white rounded-lg shadow-md p-12 text-center">
-          <p className="text-gray-500 text-lg">No hay opciones registradas</p>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-12 text-center">
+          <p className="text-gray-500 dark:text-gray-400 text-lg">No hay opciones registradas</p>
           {stocks.length > 0 && (
             <button
               onClick={() => setShowForm(true)}
@@ -561,82 +562,82 @@ function Options() {
           )}
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow-md overflow-hidden">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-gray-50 dark:bg-gray-700 border-b border-gray-200 dark:border-gray-600">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Ticker
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Estrategia
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Strike
                   </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Contratos
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Prima Total
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Rendimiento
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Expiración
                   </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Estado
                   </th>
-                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Acciones
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                 {filteredOptions.map((option) => (
-                  <tr key={option.id} className="hover:bg-gray-50">
+                  <tr key={option.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">{option.ticker}</div>
+                      <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{option.ticker}</div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-900">
+                      <div className="text-sm text-gray-900 dark:text-gray-100">
                         {option.strategy === 'COVERED_CALL' ? 'Covered Call' : 'Cash Secured Put'}
                       </div>
-                      <div className="text-xs text-gray-500">{option.option_type}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{option.option_type}</div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900 dark:text-gray-100">
                       {formatCurrency(option.strike_price)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-center text-gray-900">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-center text-gray-900 dark:text-gray-100">
                       {option.contracts}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-medium text-green-600">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right font-medium text-green-600 dark:text-green-400">
                       {formatCurrency(option.total_premium)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right">
                       {option.premium_yield != null ? (
                         <div>
-                          <div className="text-sm font-medium text-blue-600">
+                          <div className="text-sm font-medium text-blue-600 dark:text-blue-400">
                             {option.premium_yield.toFixed(2)}%
                           </div>
                           {option.annualized_return != null && (
-                            <div className="text-xs text-gray-500">
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
                               {option.annualized_return.toFixed(1)}% anual
                             </div>
                           )}
                         </div>
                       ) : (
-                        <span className="text-sm text-gray-400">-</span>
+                        <span className="text-sm text-gray-400 dark:text-gray-500">-</span>
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center space-x-2">
                         <div>
-                          <div className="text-sm text-gray-900">{formatDate(option.expiration_date)}</div>
-                          {option.days_to_expiration !== undefined && option.days_to_expiration >= 0 && (
+                          <div className="text-sm text-gray-900 dark:text-gray-100">{formatDate(option.expiration_date)}</div>
+                          {option.status === 'OPEN' && option.days_to_expiration !== undefined && option.days_to_expiration >= 0 && (
                             <div className={`text-xs font-medium ${
                               option.days_to_expiration <= 2 ? 'text-red-600' : 
                               option.days_to_expiration <= 5 ? 'text-orange-600' : 
@@ -671,17 +672,25 @@ function Options() {
                             >
                               Roll
                             </button>
-                            <span className="text-gray-300">|</span>
+                            <span className="text-gray-300 dark:text-gray-600">|</span>
                             <button
                               onClick={() => {
-                                const premium = prompt('Prima de cierre (0 si expiró sin valor):');
-                                if (premium !== null) handleClose(option.id, parseFloat(premium));
+                                let contractsToClose: number | undefined;
+                                if (option.contracts > 1) {
+                                  const c = prompt(`Contratos a cerrar (máx ${option.contracts}):`, String(option.contracts));
+                                  if (c === null) return;
+                                  contractsToClose = parseInt(c, 10);
+                                  if (isNaN(contractsToClose) || contractsToClose < 1) return;
+                                }
+                                const premium = prompt('Prima de cierre por contrato (0 si expiró sin valor):');
+                                if (premium === null) return;
+                                handleClose(option.id, parseFloat(premium), contractsToClose);
                               }}
                               className="text-blue-600 hover:text-blue-800 transition"
                             >
                               Cerrar
                             </button>
-                            <span className="text-gray-300">|</span>
+                            <span className="text-gray-300 dark:text-gray-600">|</span>
                           </>
                         )}
                         <button

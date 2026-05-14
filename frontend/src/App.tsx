@@ -13,6 +13,8 @@ import ChangePassword from './pages/ChangePassword'
 import TaxReport from './pages/TaxReport'
 import ImportIB from './pages/ImportIB'
 import ChileanMarkets from './pages/ChileanMarkets'
+import News from './pages/News'
+import Dividends from './pages/Dividends'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth()
@@ -35,6 +37,8 @@ const NAV_LINKS = [
   { to: '/calculator',   exact: false, label: 'Calculadora' },
 ]
 const NAV_EXTRA = [
+  { to: '/noticias',    label: '📰 Noticias' },
+  { to: '/dividendos',  label: '💰 Dividendos' },
   { to: '/tax-report',  label: '🇨🇱 Fiscal' },
   { to: '/import-ib',   label: '📥 Import IB' },
   { to: '/mercado-cl',  label: '📊 Mercado CL' },
@@ -244,6 +248,8 @@ function AppContent() {
           <Route path="/tax-report"   element={<PrivateRoute><TaxReport /></PrivateRoute>} />
           <Route path="/import-ib"    element={<PrivateRoute><ImportIB /></PrivateRoute>} />
           <Route path="/mercado-cl"   element={<PrivateRoute><ChileanMarkets /></PrivateRoute>} />
+          <Route path="/noticias"     element={<PrivateRoute><News /></PrivateRoute>} />
+          <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>
       </main>

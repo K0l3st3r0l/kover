@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets
+from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets, news, dividends
 
 # Crear las tablas
 Base.metadata.create_all(bind=engine)
@@ -35,6 +35,8 @@ app.include_router(calculator.router, prefix="/api/calculator", tags=["calculato
 app.include_router(fiscal.router, prefix="/api/fiscal", tags=["fiscal"])
 app.include_router(import_ib.router, prefix="/api/import-ib", tags=["import-ib"])
 app.include_router(chilean_markets.router, prefix="/api/market", tags=["chilean-markets"])
+app.include_router(news.router, prefix="/api/news", tags=["news"])
+app.include_router(dividends.router, prefix="/api/dividends", tags=["dividends"])
 
 @app.get("/")
 async def root():

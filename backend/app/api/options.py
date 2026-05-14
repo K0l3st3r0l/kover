@@ -354,7 +354,8 @@ def get_option(
     return response
 
 class OptionClose(BaseModel):
-    closing_premium: float = 0  # Si es 0, expiró sin valor
+    closing_premium: float = 0          # Si es 0, expiró sin valor
+    contracts_to_close: Optional[int] = None  # None = cerrar todos
 
 class OptionRoll(BaseModel):
     closing_premium: float          # costo por contrato para recomprar la opción actual
@@ -473,16 +474,29 @@ def close_option(
     
     if option.status != OptionStatus.OPEN:
         raise HTTPException(status_code=400, detail="Option is not open")
-    
-    # Calcular P&L
-    total_closing_cost = close_data.closing_premium * option.contracts * 100
-    realized_pnl = option.total_premium - total_closing_cost
-    
-    option.closing_premium = close_data.closing_premium
-    option.realized_pnl = realized_pnl
-    option.closed_at = datetime.now()
-    option.status = OptionStatus.CLOSED if close_data.closing_premium > 0 else OptionStatus.EXPIRED
-    
+
+    contracts_to_close = close_data.contracts_to_close or option.contracts
+    contracts_to_close = min(contracts_to_close, option.contracts)
+    is_partial = contracts_to_close < option.contracts
+
+    total_closing_cost = close_data.closing_premium * contracts_to_close * 100
+
+    if is_partial:
+        # Cierre parcial: reducir contratos y prima proporcionalmente
+        ratio_closed = contracts_to_close / option.contracts
+        premium_closed = round(option.total_premium * ratio_closed, 2)
+        partial_pnl = round(premium_closed - total_closing_cost, 2)
+        option.contracts -= contracts_to_close
+        option.total_premium = round(option.total_premium - premium_closed, 2)
+        option.realized_pnl = round((option.realized_pnl or 0) + partial_pnl, 2)
+    else:
+        # Cierre total
+        realized_pnl = round(option.total_premium - total_closing_cost, 2)
+        option.closing_premium = close_data.closing_premium
+        option.realized_pnl = realized_pnl
+        option.closed_at = datetime.now()
+        option.status = OptionStatus.CLOSED if close_data.closing_premium > 0 else OptionStatus.EXPIRED
+
     # Actualizar stock: restar costo de cierre de las primas y recalcular cost basis
     if close_data.closing_premium > 0:
         stock = db.query(Stock).filter(Stock.id == option.stock_id).first()
@@ -492,18 +506,18 @@ def close_option(
                 stock.adjusted_cost_basis = round(
                     stock.average_cost - (stock.total_premium_earned / stock.shares), 2
                 )
-    
-    # Registrar transacción si se compró para cerrar
+
+    # Registrar transacción
     if close_data.closing_premium > 0:
         transaction_type = TransactionType.BUY_CALL if option.option_type == OptionType.CALL else TransactionType.BUY_PUT
-        
+
         transaction = Transaction(
             user_id=current_user.id,
             stock_id=option.stock_id,
             option_id=option.id,
             ticker=option.ticker,
             transaction_type=transaction_type,
-            quantity=option.contracts,
+            quantity=contracts_to_close,
             price=close_data.closing_premium,
             total_amount=total_closing_cost,
             transaction_date=datetime.now()

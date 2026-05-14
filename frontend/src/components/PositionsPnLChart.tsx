@@ -34,35 +34,35 @@ const CustomTooltip = ({ active, payload }: any) => {
   const d: PositionPnL = payload[0]?.payload
   if (!d) return null
   return (
-    <div className="bg-white border border-gray-200 rounded-lg shadow-lg p-4 text-sm min-w-[220px]">
-      <p className="font-bold text-gray-900 text-base mb-2">{d.ticker}</p>
-      <div className="space-y-1 text-xs text-gray-600">
+    <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg p-4 text-sm min-w-[220px]">
+      <p className="font-bold text-gray-900 dark:text-gray-100 text-base mb-2">{d.ticker}</p>
+      <div className="space-y-1 text-xs text-gray-600 dark:text-gray-400">
         <div className="flex justify-between gap-4">
-          <span>Acciones</span><span className="font-medium text-gray-800">{d.shares}</span>
+          <span>Acciones</span><span className="font-medium text-gray-800 dark:text-gray-200">{d.shares}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span>Precio compra (promedio)</span><span className="font-medium text-gray-800">{fmt(d.cost_basis_raw)}</span>
+          <span>Precio compra (promedio)</span><span className="font-medium text-gray-800 dark:text-gray-200">{fmt(d.cost_basis_raw)}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span>Costo ajustado (neto premiums)</span><span className="font-medium text-blue-600">{fmt(d.adjusted_cost_basis)}</span>
+          <span>Costo ajustado (neto premiums)</span><span className="font-medium text-blue-600 dark:text-blue-400">{fmt(d.adjusted_cost_basis)}</span>
         </div>
         <div className="flex justify-between gap-4">
-          <span>Precio actual</span><span className="font-medium text-gray-800">{fmt(d.current_price)}</span>
+          <span>Precio actual</span><span className="font-medium text-gray-800 dark:text-gray-200">{fmt(d.current_price)}</span>
         </div>
-        <hr className="my-2" />
+        <hr className="my-2 border-gray-200 dark:border-gray-600" />
         <div className="flex justify-between gap-4">
           <span>P&L no realizado</span>
-          <span className={`font-semibold ${d.unrealized_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+          <span className={`font-semibold ${d.unrealized_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
             {fmt(d.unrealized_pnl)} ({fmtPct(d.unrealized_pct)})
           </span>
         </div>
         <div className="flex justify-between gap-4">
           <span>Premiums cobrados</span>
-          <span className="font-semibold text-green-600">+{fmt(d.premium_earned)}</span>
+          <span className="font-semibold text-green-600 dark:text-green-400">+{fmt(d.premium_earned)}</span>
         </div>
-        <div className="flex justify-between gap-4 text-sm pt-1 border-t border-gray-100">
-          <span className="font-semibold text-gray-700">P&L total</span>
-          <span className={`font-bold ${d.total_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+        <div className="flex justify-between gap-4 text-sm pt-1 border-t border-gray-100 dark:border-gray-600">
+          <span className="font-semibold text-gray-700 dark:text-gray-300">P&L total</span>
+          <span className={`font-bold ${d.total_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
             {fmt(d.total_pnl)} ({fmtPct(d.total_pct)})
           </span>
         </div>
@@ -88,21 +88,21 @@ export default function PositionsPnLChart({ data }: Props) {
   }
 
   return (
-    <div className="bg-white shadow rounded-lg p-6 mb-8">
+    <div className="bg-white dark:bg-gray-800 shadow rounded-lg p-6 mb-8">
       <div className="flex justify-between items-start mb-6">
         <div>
-          <h3 className="text-xl font-bold text-gray-900">P&amp;L por Posición</h3>
-          <p className="text-sm text-gray-500 mt-1">
+          <h3 className="text-xl font-bold text-gray-900 dark:text-gray-100">P&amp;L por Posición</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
             P&amp;L no realizado + premiums cobrados, ordenado de mejor a peor
           </p>
         </div>
-        <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
+        <div className="flex gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
           {(['dollars', 'percent'] as Mode[]).map(m => (
             <button
               key={m}
               onClick={() => setMode(m)}
               className={`px-3 py-1.5 text-sm rounded-md transition-colors font-medium ${
-                mode === m ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
+                mode === m ? 'bg-white dark:bg-gray-600 shadow text-gray-900 dark:text-gray-100' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'
               }`}
             >
               {m === 'dollars' ? '$ USD' : '% ROI'}
@@ -147,7 +147,7 @@ export default function PositionsPnLChart({ data }: Props) {
       <div className="mt-4 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-xs text-gray-400 uppercase border-b border-gray-100">
+            <tr className="text-xs text-gray-400 dark:text-gray-500 uppercase border-b border-gray-100 dark:border-gray-700">
               <th className="text-left py-2 pr-4">Ticker</th>
               <th className="text-right pr-4">Acciones</th>
               <th className="text-right pr-4">Costo ajustado</th>
@@ -159,16 +159,16 @@ export default function PositionsPnLChart({ data }: Props) {
           </thead>
           <tbody>
             {chartData.map(d => (
-              <tr key={d.ticker} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
-                <td className="py-2.5 pr-4 font-bold text-gray-900">{d.ticker}</td>
-                <td className="text-right pr-4 text-gray-600">{d.shares}</td>
-                <td className="text-right pr-4 text-gray-600">{fmt(d.adjusted_cost_basis)}</td>
-                <td className="text-right pr-4 text-gray-600">{fmt(d.current_price)}</td>
-                <td className={`text-right pr-4 font-medium ${d.unrealized_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
-                  {fmt(d.unrealized_pnl)}<span className="text-xs text-gray-400 ml-1">({fmtPct(d.unrealized_pct)})</span>
+              <tr key={d.ticker} className="border-b border-gray-50 dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors">
+                <td className="py-2.5 pr-4 font-bold text-gray-900 dark:text-gray-100">{d.ticker}</td>
+                <td className="text-right pr-4 text-gray-600 dark:text-gray-400">{d.shares}</td>
+                <td className="text-right pr-4 text-gray-600 dark:text-gray-400">{fmt(d.adjusted_cost_basis)}</td>
+                <td className="text-right pr-4 text-gray-600 dark:text-gray-400">{fmt(d.current_price)}</td>
+                <td className={`text-right pr-4 font-medium ${d.unrealized_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                  {fmt(d.unrealized_pnl)}<span className="text-xs text-gray-400 dark:text-gray-500 ml-1">({fmtPct(d.unrealized_pct)})</span>
                 </td>
-                <td className="text-right pr-4 text-blue-600 font-medium">+{fmt(d.premium_earned)}</td>
-                <td className={`text-right font-bold ${d.total_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <td className="text-right pr-4 text-blue-600 dark:text-blue-400 font-medium">+{fmt(d.premium_earned)}</td>
+                <td className={`text-right font-bold ${d.total_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {fmt(d.total_pnl)}<span className="text-xs ml-1">({fmtPct(d.total_pct)})</span>
                 </td>
               </tr>

@@ -89,16 +89,16 @@ function Transactions() {
 
   const getTransactionTypeColor = (type: string) => {
     const colors: { [key: string]: string } = {
-      'BUY_STOCK': 'text-red-600 bg-red-50',
-      'SELL_STOCK': 'text-green-600 bg-green-50',
-      'SELL_CALL': 'text-green-600 bg-green-50',
-      'BUY_CALL': 'text-red-600 bg-red-50',
-      'SELL_PUT': 'text-green-600 bg-green-50',
-      'BUY_PUT': 'text-red-600 bg-red-50',
-      'ASSIGNMENT': 'text-purple-600 bg-purple-50',
-      'DIVIDEND': 'text-blue-600 bg-blue-50'
+      'BUY_STOCK': 'text-red-600 bg-red-50 dark:bg-red-900/30 dark:text-red-300',
+      'SELL_STOCK': 'text-green-600 bg-green-50 dark:bg-green-900/30 dark:text-green-300',
+      'SELL_CALL': 'text-green-600 bg-green-50 dark:bg-green-900/30 dark:text-green-300',
+      'BUY_CALL': 'text-red-600 bg-red-50 dark:bg-red-900/30 dark:text-red-300',
+      'SELL_PUT': 'text-green-600 bg-green-50 dark:bg-green-900/30 dark:text-green-300',
+      'BUY_PUT': 'text-red-600 bg-red-50 dark:bg-red-900/30 dark:text-red-300',
+      'ASSIGNMENT': 'text-purple-600 bg-purple-50 dark:bg-purple-900/30 dark:text-purple-300',
+      'DIVIDEND': 'text-blue-600 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300'
     }
-    return colors[type] || 'text-gray-600 bg-gray-50'
+    return colors[type] || 'text-gray-600 bg-gray-50 dark:bg-gray-700 dark:text-gray-300'
   }
 
   const handleFilterChange = (field: string, value: string) => {
@@ -206,24 +206,24 @@ function Transactions() {
           </div>
           {/* Fila 2: Flujos históricos */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="bg-white rounded-lg shadow p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Comprado (Histórico)</p>
               <p className="text-xs text-gray-400 mb-1">Suma de todas las compras, incl. ya vendidas</p>
               <p className="text-2xl font-bold text-red-600">{formatCurrency(summary.stock_buys)}</p>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Total Vendido (Histórico)</p>
               <p className="text-xs text-gray-400 mb-1">Proceeds de todas las ventas</p>
               <p className="text-2xl font-bold text-green-600">{formatCurrency(summary.stock_sells)}</p>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Flujo Neto de Caja</p>
               <p className="text-xs text-gray-400 mb-1">Lo que salió de tu bolsillo en total</p>
               <p className={`text-2xl font-bold ${summary.stock_buys - summary.stock_sells >= 0 ? 'text-red-600' : 'text-green-600'}`}>
                 {formatCurrency(summary.stock_buys - summary.stock_sells)}
               </p>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
               <p className="text-xs text-gray-400 uppercase tracking-wide mb-1">Dividendos Cobrados</p>
               <p className="text-2xl font-bold text-blue-500">{formatCurrency(summary.dividends)}</p>
             </div>
@@ -232,24 +232,24 @@ function Transactions() {
       )}
 
       {/* Filters */}
-      <div className="bg-white rounded-lg shadow p-4 mb-6">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6">
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Ticker</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Ticker</label>
             <input
               type="text"
               value={filters.ticker}
               onChange={(e) => handleFilterChange('ticker', e.target.value.toUpperCase())}
               placeholder="e.g., AAPL"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Type</label>
             <select
               value={filters.transaction_type}
               onChange={(e) => handleFilterChange('transaction_type', e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">All Types</option>
               <option value="BUY_STOCK">Buy Stock</option>
@@ -263,28 +263,28 @@ function Transactions() {
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Start Date</label>
             <input
               type="date"
               value={filters.start_date}
               onChange={(e) => handleFilterChange('start_date', e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">End Date</label>
             <input
               type="date"
               value={filters.end_date}
               onChange={(e) => handleFilterChange('end_date', e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
         </div>
         <div className="mt-4 flex justify-end">
           <button
             onClick={clearFilters}
-            className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-md hover:bg-gray-200 transition-colors"
+            className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
           >
             Clear Filters
           </button>
@@ -292,73 +292,73 @@ function Transactions() {
       </div>
 
       {/* Transactions Table */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
+          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+            <thead className="bg-gray-50 dark:bg-gray-700">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Date
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Ticker
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Type
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Quantity
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Price
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Total Amount
                 </th>
-                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Commission
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                   Notes
                 </th>
               </tr>
             </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
+            <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
               {transactions.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-12 text-center text-gray-500">
+                  <td colSpan={8} className="px-6 py-12 text-center text-gray-500 dark:text-gray-400">
                     No transactions found. Try adjusting your filters.
                   </td>
                 </tr>
               ) : (
                 transactions.map((transaction) => (
-                  <tr key={transaction.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                  <tr key={transaction.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-gray-100">
                       {formatDate(transaction.transaction_date)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm font-medium text-gray-900">{transaction.ticker}</span>
+                      <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{transaction.ticker}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${getTransactionTypeColor(transaction.transaction_type)}`}>
                         {getTransactionTypeLabel(transaction.transaction_type)}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900 dark:text-gray-100">
                       {transaction.quantity}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-900 dark:text-gray-100">
                       {formatCurrency(transaction.price)}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-right">
-                      <span className={transaction.total_amount >= 0 ? 'text-green-600 font-medium' : 'text-red-600 font-medium'}>
+                      <span className={transaction.total_amount >= 0 ? 'text-green-600 dark:text-green-400 font-medium' : 'text-red-600 dark:text-red-400 font-medium'}>
                         {formatCurrency(Math.abs(transaction.total_amount))}
                       </span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500">
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-500 dark:text-gray-400">
                       {formatCurrency(transaction.commission)}
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-500">
+                    <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
                       {transaction.notes || '-'}
                     </td>
                   </tr>
@@ -370,22 +370,22 @@ function Transactions() {
 
         {/* Pagination */}
         {pagination.total > pagination.limit && (
-          <div className="bg-gray-50 px-6 py-4 flex items-center justify-between border-t border-gray-200">
-            <div className="text-sm text-gray-700">
+          <div className="bg-gray-50 dark:bg-gray-700 px-6 py-4 flex items-center justify-between border-t border-gray-200 dark:border-gray-600">
+            <div className="text-sm text-gray-700 dark:text-gray-300">
               Showing {pagination.skip + 1} to {Math.min(pagination.skip + pagination.limit, pagination.total)} of {pagination.total} transactions
             </div>
             <div className="flex gap-2">
               <button
                 onClick={prevPage}
                 disabled={pagination.skip === 0}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Previous
               </button>
               <button
                 onClick={nextPage}
                 disabled={pagination.skip + pagination.limit >= pagination.total}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Next
               </button>

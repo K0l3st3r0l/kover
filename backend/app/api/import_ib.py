@@ -16,7 +16,7 @@ Cómo exportar desde IB:
   4. Formato: CSV → Download
 """
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Body
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -76,6 +76,11 @@ class ImportResult(BaseModel):
     errores: List[str]
 
 
+class ManualPreviewRequest(BaseModel):
+    raw_text: str
+    trade_date: str                    # YYYY-MM-DD
+
+
 # ─── Parser del formato IB Activity Statement ─────────────────────────────────
 
 # Formato compacto IB: 'AAPL  250117C00150000'
@@ -93,6 +98,50 @@ IB_OPTION_RE2 = re.compile(
     r"(?P<strike>[\d.]+)\s+"                 # strike decimal (ej: 8.5)
     r"(?P<opttype>[CP])$"                    # C=Call, P=Put
 )
+
+# Formato visible en tabla de Trades: 'F May15'26 12 Call' o 'F May08 '26 12 Call'
+IB_OPTION_RE3 = re.compile(
+    r"^(?P<underlying>[A-Z]{1,10})\s+"
+    r"(?P<mon>[A-Za-z]{3})\s*(?P<dd>\d{1,2})\s*'(?P<yy>\d{2})\s+"
+    r"(?P<strike>[\d.]+)\s+"
+    r"(?P<opttype>Call|Put|C|P)$",
+    re.IGNORECASE,
+)
+
+MANUAL_SUMMARY_RE = re.compile(
+    r"^(?P<action>Sold|Bought|Bot|Buy|Sell)\s+"
+    r"(?P<qty>[-\d.,]+)\s+@\s+"
+    r"(?P<price>[-\d.,]+)"
+    r"(?:\s+on\s+(?P<venue>.+))?$",
+    re.IGNORECASE,
+)
+MANUAL_TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
+# Formato fecha+hora visible en tabla de Trades: '8/5/2026, 9:42' (D/M/YYYY H:MM europeo)
+MANUAL_DATETIME_RE = re.compile(
+    r"^(?P<d>\d{1,2})/(?P<m>\d{1,2})/(?P<y>\d{4}),?\s+(?P<hm>\d{1,2}:\d{2})$"
+)
+MANUAL_ACCOUNT_RE = re.compile(r"^[A-Z]\d{5,}$")
+MANUAL_COMMISSION_RE = re.compile(
+    r"^(?:Comisiones?|Commission(?:s)?):\s*(?P<value>[-\d.,]+)$",
+    re.IGNORECASE,
+)
+MANUAL_STATUS_TOKENS = {
+    "filled",
+    "partially filled",
+    "submitted",
+    "cancelled",
+    "pending",
+}
+MANUAL_HEADER_TOKENS = {
+    "TRADES",
+    "CUENTA",
+    "ACCION",
+    "ACCIÓN",
+    "CANTIDAD",
+    "STATUS",
+    "PRECIO",
+    "COMISIONES",
+}
 
 _MONTH_MAP = {
     "JAN": "01", "FEB": "02", "MAR": "03", "APR": "04",
@@ -130,6 +179,18 @@ def parse_ib_option_symbol(symbol: str):
         expiry = f"20{m2.group('yy')}-{mm}-{m2.group('dd')}"
         return underlying, opt_type, strike, expiry
 
+    # Intenta formato visible en tabla de trades: 'F May15'26 12 Call'
+    m3 = IB_OPTION_RE3.match(s)
+    if m3:
+        underlying = m3.group("underlying").strip()
+        opt_label = m3.group("opttype").upper()
+        opt_type = "C" if opt_label.startswith("C") else "P"
+        strike = float(m3.group("strike"))
+        mm = _MONTH_MAP.get(m3.group("mon").upper(), "01")
+        dd = m3.group("dd").zfill(2)
+        expiry = f"20{m3.group('yy')}-{mm}-{dd}"
+        return underlying, opt_type, strike, expiry
+
     return None
 
 
@@ -159,9 +220,41 @@ TIPO_LABELS = {
 
 
 def parse_float(value: str) -> float:
-    """Parsea un número que puede tener comas como separador de miles."""
+    """Parsea números con formato US o local, por ejemplo 1,234.56 o 1.234,56."""
     try:
-        return float(value.replace(",", "").strip())
+        if value is None:
+            return 0.0
+
+        normalized = str(value).strip()
+        if not normalized:
+            return 0.0
+
+        normalized = (
+            normalized
+            .replace("$", "")
+            .replace("USD", "")
+            .replace("US$", "")
+            .replace("\xa0", "")
+            .replace("−", "-")
+            .replace(" ", "")
+        )
+
+        if normalized.startswith("(") and normalized.endswith(")"):
+            normalized = f"-{normalized[1:-1]}"
+
+        if "," in normalized and "." in normalized:
+            if normalized.rfind(",") > normalized.rfind("."):
+                normalized = normalized.replace(".", "").replace(",", ".")
+            else:
+                normalized = normalized.replace(",", "")
+        elif "," in normalized:
+            whole, decimal = normalized.rsplit(",", 1)
+            if decimal.isdigit() and len(decimal) <= 2:
+                normalized = f"{whole.replace('.', '')}.{decimal}"
+            else:
+                normalized = normalized.replace(",", "")
+
+        return float(normalized)
     except (ValueError, AttributeError):
         return 0.0
 
@@ -318,6 +411,245 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
     return rows, errors
 
 
+def normalize_manual_line(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
+def normalize_manual_action(value: str) -> Optional[str]:
+    action = value.strip().lower()
+    if action in ("bought", "bot", "buy"):
+        return "BUY"
+    if action in ("sold", "sell"):
+        return "SELL"
+    return None
+
+
+def is_header_like_line(value: str) -> bool:
+    return value.strip().upper() in MANUAL_HEADER_TOKENS
+
+
+def is_numeric_line(value: str) -> bool:
+    candidate = value.strip().replace(" ", "")
+    if not candidate:
+        return False
+    return bool(re.fullmatch(r"[-\d.,]+", candidate))
+
+
+def is_symbol_candidate(value: str) -> bool:
+    lower_value = value.strip().lower()
+    if not value or is_header_like_line(value):
+        return False
+    if MANUAL_SUMMARY_RE.match(value):
+        return False
+    if MANUAL_TIME_RE.match(value):
+        return False
+    if MANUAL_ACCOUNT_RE.match(value):
+        return False
+    if MANUAL_COMMISSION_RE.match(value):
+        return False
+    if normalize_manual_action(value) is not None:
+        return False
+    if lower_value in MANUAL_STATUS_TOKENS:
+        return False
+    if is_numeric_line(value):
+        return False
+    if MANUAL_DATETIME_RE.match(value):
+        return False
+    return True
+
+
+def split_manual_trade_blocks(content: str) -> list[tuple[int, list[str]]]:
+    blocks: list[tuple[int, list[str]]] = []
+    current_lines: list[str] = []
+    current_start = 1
+
+    # Strip trailing tabs per line before converting tabs to newlines; IB table copies
+    # produce lines like "U7013196\tSold\t1\t" whose trailing tab would create a
+    # spurious empty line that prematurely splits the block.
+    pre = content.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = "\n".join(line.rstrip("\t") for line in pre.split("\n")).replace("\t", "\n")
+
+    for index, raw_line in enumerate(normalized.split("\n"), start=1):
+        line = normalize_manual_line(raw_line)
+        if not line:
+            if current_lines:
+                blocks.append((current_start, current_lines))
+                current_lines = []
+            current_start = index + 1
+            continue
+
+        if not current_lines:
+            current_start = index
+        current_lines.append(line)
+
+        if MANUAL_COMMISSION_RE.match(line):
+            blocks.append((current_start, current_lines))
+            current_lines = []
+            current_start = index + 1
+
+    if current_lines:
+        blocks.append((current_start, current_lines))
+
+    return blocks
+
+
+def parse_manual_trade_block(start_line: int, block: list[str], trade_date: str) -> tuple[Optional[dict], list[str]]:
+    if not block or all(is_header_like_line(line) for line in block):
+        return None, []
+
+    summary_line = next((line for line in block if MANUAL_SUMMARY_RE.match(line)), None)
+    if not summary_line:
+        return None, [f"Bloque desde línea {start_line}: no se encontró una línea tipo 'Bought 1 @ 0.22 on CBOE'."]
+
+    summary_match = MANUAL_SUMMARY_RE.match(summary_line)
+    if not summary_match:
+        return None, [f"Bloque desde línea {start_line}: formato de resumen inválido '{summary_line}'."]
+
+    action = normalize_manual_action(summary_match.group("action") or "")
+    if not action:
+        return None, [f"Bloque desde línea {start_line}: acción no reconocida en '{summary_line}'."]
+
+    symbol_line = next((line for line in block if is_symbol_candidate(line)), None)
+    if not symbol_line:
+        return None, [f"Bloque desde línea {start_line}: no se pudo identificar el símbolo de la operación."]
+
+    status_line = next((line for line in block if line.strip().lower() in MANUAL_STATUS_TOKENS), None)
+    if status_line and status_line.strip().lower() != "filled":
+        return None, [
+            f"Bloque desde línea {start_line}: status '{status_line}' no es final. Solo se importan operaciones ejecutadas (Filled)."
+        ]
+
+    # Intentar extraer fecha+hora completa del bloque (ej: "8/5/2026, 9:42" formato europeo D/M/YYYY)
+    dt = None
+    for line in block:
+        dm = MANUAL_DATETIME_RE.match(line)
+        if dm:
+            try:
+                day, month, year = int(dm.group("d")), int(dm.group("m")), int(dm.group("y"))
+                hm = dm.group("hm")
+                if len(hm.split(":")) == 2:
+                    hm = f"{hm}:00"
+                dt = datetime.strptime(f"{year:04d}-{month:02d}-{day:02d} {hm}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+            break
+
+    if not dt:
+        time_line = next((line for line in block if MANUAL_TIME_RE.match(line)), None)
+        time_value = time_line or "00:00:00"
+        if len(time_value.split(":")) == 2:
+            time_value = f"{time_value}:00"
+        dt = parse_ib_datetime(f"{trade_date} {time_value}")
+
+    if not dt:
+        return None, [f"Bloque desde línea {start_line}: fecha/hora inválida."]
+
+    quantity_abs = abs(parse_float(summary_match.group("qty") or "0"))
+    price_value = abs(parse_float(summary_match.group("price") or "0"))
+    if quantity_abs == 0:
+        return None, [f"Bloque desde línea {start_line}: cantidad inválida en '{summary_line}'."]
+
+    number_values: list[float] = []
+    for line in block:
+        if not is_numeric_line(line):
+            continue
+        parsed_number = abs(parse_float(line))
+        if parsed_number == 0:
+            continue
+        number_values.append(parsed_number)
+
+    total_value = 0.0
+    if number_values:
+        for parsed_number in reversed(number_values):
+            if round(parsed_number, 4) not in (round(quantity_abs, 4), round(price_value, 4)):
+                total_value = parsed_number
+                break
+
+    opt_info = parse_ib_option_symbol(symbol_line)
+    is_option_trade = opt_info is not None
+
+    if total_value == 0:
+        multiplier = 100 if is_option_trade else 1
+        total_value = round(quantity_abs * price_value * multiplier, 2)
+
+    commission_match = next((MANUAL_COMMISSION_RE.match(line) for line in block if MANUAL_COMMISSION_RE.match(line)), None)
+    commission_value = abs(parse_float(commission_match.group("value"))) if commission_match else 0.0
+
+    signed_quantity = quantity_abs if action == "BUY" else -quantity_abs
+
+    return {
+        "line": start_line,
+        "section": "Trades",
+        "asset_category": "Equity and Index Options" if is_option_trade else "Stocks",
+        "symbol": symbol_line,
+        "datetime_str": dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "quantity": signed_quantity,
+        "t_price": price_value,
+        "proceeds": total_value,
+        "comm_fee": commission_value,
+        "description": f"Manual trade import | {summary_line}",
+    }, []
+
+
+def parse_manual_trades_text(content: str, trade_date: str) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    errors: list[str] = []
+
+    try:
+        datetime.strptime(trade_date, "%Y-%m-%d")
+    except ValueError:
+        return [], ["La fecha de operaciones debe venir en formato YYYY-MM-DD."]
+
+    for start_line, block in split_manual_trade_blocks(content):
+        parsed_row, block_errors = parse_manual_trade_block(start_line, block, trade_date)
+        if parsed_row:
+            rows.append(parsed_row)
+        errors.extend(block_errors)
+
+    return rows, errors
+
+
+def build_existing_hashes(db: Session, current_user: User) -> set:
+    existing_txs = (
+        db.query(Transaction)
+        .filter(Transaction.user_id == current_user.id)
+        .all()
+    )
+
+    existing_hashes: set = set()
+    for t in existing_txs:
+        sig = (
+            t.ticker,
+            t.transaction_date.strftime("%Y-%m-%d"),
+            t.transaction_type.value,
+            round(abs(t.total_amount), 2),
+            round(t.quantity, 4),
+        )
+        existing_hashes.add(sig)
+
+    return existing_hashes
+
+
+def build_preview_response(raw_rows: list[dict], parse_errors: list[str], db: Session, current_user: User) -> PreviewResponse:
+    parsed, build_errors = build_parsed_transactions(raw_rows, build_existing_hashes(db, current_user))
+    all_errors = parse_errors + build_errors
+
+    tickers_acciones = sorted({
+        p.ticker for p in parsed
+        if p.tipo in ("BUY_STOCK", "SELL_STOCK")
+    })
+
+    return PreviewResponse(
+        transacciones=parsed,
+        tickers_acciones=tickers_acciones,
+        total_filas_csv=len(raw_rows),
+        total_importables=sum(1 for p in parsed if not p.duplicado),
+        total_duplicados=sum(1 for p in parsed if p.duplicado),
+        total_advertencias=sum(1 for p in parsed if p.advertencia),
+        errores_parseo=all_errors,
+    )
+
+
 def build_parsed_transactions(
     raw_rows: list[dict],
     existing_hashes: set,
@@ -455,41 +787,27 @@ async def preview_import(
         content = content_bytes.decode("latin-1")
 
     raw_rows, parse_errors = parse_ib_csv(content)
+    return build_preview_response(raw_rows, parse_errors, db, current_user)
 
-    # Construir set de firmas existentes en BD para detectar duplicados
-    existing_txs = (
-        db.query(Transaction)
-        .filter(Transaction.user_id == current_user.id)
-        .all()
-    )
-    existing_hashes: set = set()
-    for t in existing_txs:
-        sig = (
-            t.ticker,
-            t.transaction_date.strftime("%Y-%m-%d"),
-            t.transaction_type.value,
-            round(abs(t.total_amount), 2),
-            round(t.quantity, 4),
-        )
-        existing_hashes.add(sig)
 
-    parsed, build_errors = build_parsed_transactions(raw_rows, existing_hashes)
-    all_errors = parse_errors + build_errors
+@router.post("/preview-manual", response_model=PreviewResponse)
+async def preview_manual_import(
+    body: ManualPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Recibe texto pegado desde la tabla de Trades de IBKR y devuelve una
+    previsualización usando la misma lógica de importación del CSV.
+    """
+    if not body.raw_text or not body.raw_text.strip():
+        raise HTTPException(status_code=400, detail="Debes pegar al menos una operación desde la tabla de Trades.")
 
-    tickers_acciones = sorted({
-        p.ticker for p in parsed
-        if p.tipo in ("BUY_STOCK", "SELL_STOCK")
-    })
+    raw_rows, parse_errors = parse_manual_trades_text(body.raw_text, body.trade_date)
+    if not raw_rows and parse_errors:
+        raise HTTPException(status_code=400, detail=parse_errors[0])
 
-    return PreviewResponse(
-        transacciones=parsed,
-        tickers_acciones=tickers_acciones,
-        total_filas_csv=len(raw_rows),
-        total_importables=sum(1 for p in parsed if not p.duplicado),
-        total_duplicados=sum(1 for p in parsed if p.duplicado),
-        total_advertencias=sum(1 for p in parsed if p.advertencia),
-        errores_parseo=all_errors,
-    )
+    return build_preview_response(raw_rows, parse_errors, db, current_user)
 
 
 @router.post("/confirm", response_model=ImportResult)
@@ -667,22 +985,31 @@ async def confirm_import(
             continue
 
         if t.tipo in ("SELL_CALL", "SELL_PUT"):
-            # Verificar si ya existe un Option idéntico (evitar duplicados)
-            existing_opt = db.query(Option).filter(
-                Option.stock_id == stk.id,
-                Option.ticker == t.ticker,
-                Option.strike_price == t.strike_price,
-                Option.expiration_date == dt_exp,
-                Option.status == OptionStatus.OPEN,
-            ).first()
-            if existing_opt:
-                continue
-
             opt_type_enum = OptionType.CALL if t.opt_type == "C" else OptionType.PUT
             strategy = OptionStrategy.COVERED_CALL if t.opt_type == "C" else OptionStrategy.CASH_SECURED_PUT
             contracts = int(t.cantidad)
             premium_per = t.precio_usd
             total_premium = round(contracts * 100 * premium_per, 2)
+
+            # Si ya existe un Option abierto para el mismo contrato, consolidar contratos
+            # (autoflush=False: flush previo para ver los que se acaban de agregar en este batch)
+            db.flush()
+            existing_opt = db.query(Option).filter(
+                Option.stock_id == stk.id,
+                Option.ticker == t.ticker,
+                Option.strike_price == t.strike_price,
+                Option.expiration_date == dt_exp,
+                Option.option_type == opt_type_enum,
+                Option.status == OptionStatus.OPEN,
+            ).first()
+            if existing_opt:
+                existing_opt.contracts += contracts
+                existing_opt.total_premium = round(existing_opt.total_premium + total_premium, 2)
+                if existing_opt.contracts > 0:
+                    existing_opt.premium_per_contract = round(
+                        existing_opt.total_premium / (existing_opt.contracts * 100), 4
+                    )
+                continue
 
             new_opt = Option(
                 stock_id=stk.id,
@@ -700,7 +1027,7 @@ async def confirm_import(
             db.add(new_opt)
 
         elif t.tipo in ("BUY_CALL", "BUY_PUT"):
-            # Buscar la opción abierta correspondiente para cerrarla
+            # Buscar la opción abierta correspondiente para cerrarla (total o parcialmente)
             opt_type_enum = OptionType.CALL if t.opt_type == "C" else OptionType.PUT
             open_opt = db.query(Option).filter(
                 Option.stock_id == stk.id,
@@ -715,12 +1042,24 @@ async def confirm_import(
                 except ValueError:
                     dt_close = None
                 closing_cost = t.total_usd
-                # closing_premium se almacena por acción (igual que options.py): total / (contracts × 100)
-                per_share_premium = closing_cost / (open_opt.contracts * 100) if open_opt.contracts > 0 else 0.0
-                open_opt.status = OptionStatus.CLOSED
-                open_opt.closed_at = dt_close
-                open_opt.closing_premium = round(per_share_premium, 4)
-                open_opt.realized_pnl = round(open_opt.total_premium - closing_cost, 2)
+                contracts_closing = int(t.cantidad)
+
+                if contracts_closing >= open_opt.contracts:
+                    # Cierre total
+                    per_share_premium = closing_cost / (open_opt.contracts * 100) if open_opt.contracts > 0 else 0.0
+                    open_opt.status = OptionStatus.CLOSED
+                    open_opt.closed_at = dt_close
+                    open_opt.closing_premium = round(per_share_premium, 4)
+                    open_opt.realized_pnl = round(open_opt.total_premium - closing_cost, 2)
+                else:
+                    # Cierre parcial: reducir contratos y prima proporcionalmente
+                    ratio_closed = contracts_closing / open_opt.contracts
+                    premium_closed = round(open_opt.total_premium * ratio_closed, 2)
+                    partial_pnl = round(premium_closed - closing_cost, 2)
+                    open_opt.contracts -= contracts_closing
+                    open_opt.total_premium = round(open_opt.total_premium - premium_closed, 2)
+                    # Acumular P&L realizado parcial en el campo realized_pnl
+                    open_opt.realized_pnl = round((open_opt.realized_pnl or 0) + partial_pnl, 2)
 
     # ── Fase 3.5: cerrar opciones asignadas ───────────────────────────
     for t in to_import:

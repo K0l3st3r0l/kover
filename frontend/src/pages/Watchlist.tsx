@@ -479,93 +479,93 @@ function Watchlist() {
       )}
 
       {/* Watchlist Table */}
-      <div className="bg-white rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
         {watchlist.length === 0 ? (
           <div className="text-center py-12">
-            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg className="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
             </svg>
-            <h3 className="mt-2 text-sm font-medium text-gray-900">No tickers in watchlist</h3>
-            <p className="mt-1 text-sm text-gray-500">Get started by adding a ticker to track.</p>
+            <h3 className="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No tickers in watchlist</h3>
+            <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Get started by adding a ticker to track.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <thead className="bg-gray-50 dark:bg-gray-700">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Ticker
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Company
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Current Price
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Target Price
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Distance to Target
                   </th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Notes
                   </th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                     Actions
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                 {watchlist.map((item) => (
-                  <tr key={item.id} className="hover:bg-gray-50">
+                  <tr key={item.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm font-bold text-blue-600">{item.ticker}</span>
+                      <span className="text-sm font-bold text-blue-600 dark:text-blue-400">{item.ticker}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span className="text-sm text-gray-900">{item.company_name || '-'}</span>
+                      <span className="text-sm text-gray-900 dark:text-gray-100">{item.company_name || '-'}</span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right">
-                      <span className="text-sm font-medium text-gray-900">
+                      <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
                         {formatCurrency(item.current_price)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right">
-                      <span className="text-sm text-gray-900">
+                      <span className="text-sm text-gray-900 dark:text-gray-100">
                         {formatCurrency(item.target_price)}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right">
                       {item.distance_to_target !== undefined && item.distance_to_target !== null ? (
                         <div>
-                          <span className={`text-sm font-medium ${item.distance_to_target >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          <span className={`text-sm font-medium ${item.distance_to_target >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                             {formatCurrency(Math.abs(item.distance_to_target))}
                           </span>
                           <br />
-                          <span className={`text-xs ${item.distance_to_target_pct && item.distance_to_target_pct >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          <span className={`text-xs ${item.distance_to_target_pct && item.distance_to_target_pct >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                             ({formatPercent(item.distance_to_target_pct)})
                           </span>
                         </div>
                       ) : (
-                        <span className="text-sm text-gray-500">-</span>
+                        <span className="text-sm text-gray-500 dark:text-gray-400">-</span>
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      <span className="text-sm text-gray-500 truncate max-w-xs block">
+                      <span className="text-sm text-gray-500 dark:text-gray-400 truncate max-w-xs block">
                         {item.notes || '-'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <button
                         onClick={() => handleEdit(item)}
-                        className="text-blue-600 hover:text-blue-900 mr-3"
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 mr-3"
                       >
                         Edit
                       </button>
                       <button
                         onClick={() => handleDelete(item.id)}
-                        className="text-red-600 hover:text-red-900"
+                        className="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300"
                       >
                         Delete
                       </button>

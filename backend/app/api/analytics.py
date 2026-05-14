@@ -698,7 +698,6 @@ async def get_covered_call_cycles(
     """
     options = db.query(Option).join(Stock).filter(
         Stock.user_id == current_user.id,
-        Option.strategy == OptionStrategy.COVERED_CALL
     ).order_by(Option.opened_at.asc()).all()
 
     cycles = []
@@ -745,7 +744,9 @@ async def get_covered_call_cycles(
             "net_yield": round(net_yield, 4),
             "annualized_return": annualized,
             "status": opt.status.value,
-            "notes": opt.notes or ""
+            "notes": opt.notes or "",
+            "option_type": opt.option_type.value,
+            "strategy": opt.strategy.value,
         })
 
     # ── Detectar rolls: mismo ticker, apertura del siguiente == cierre del anterior ──

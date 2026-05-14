@@ -441,7 +441,7 @@ function Dashboard() {
                   value={cashInput}
                   onChange={e => setCashInput(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') saveCash(); if (e.key === 'Escape') setEditingCash(false) }}
-                  className="w-full border border-blue-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400"
+                  className="w-full border border-blue-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white text-gray-900"
                 />
               </div>
               <div className="flex gap-2 mt-2">
@@ -556,63 +556,63 @@ function Dashboard() {
       {metrics && (
         <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 mb-8">
           {/* ── P&L Resumen ─────────────────────────────────────────────── */}
-          <div className="bg-gradient-to-br from-blue-50 to-blue-100 overflow-hidden shadow rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-gray-800 mb-1">P&amp;L Portafolio</h3>
-            <p className="text-xs text-gray-500 mb-4">Posiciones actuales + historial completo</p>
+          <div className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/30 dark:to-blue-800/20 overflow-hidden shadow rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 mb-1">P&amp;L Portafolio</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">Posiciones actuales + historial completo</p>
 
             {/* Unrealized */}
-            <div className="mb-3 pb-3 border-b border-blue-200">
+            <div className="mb-3 pb-3 border-b border-blue-200 dark:border-blue-700/50">
               <div className="flex justify-between items-baseline">
-                <span className="text-sm text-gray-600">No realizado (posiciones abiertas)</span>
-                <span className={`text-base font-bold ${metrics.unrealized_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <span className="text-sm text-gray-600 dark:text-gray-300">No realizado (posiciones abiertas)</span>
+                <span className={`text-base font-bold ${metrics.unrealized_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.unrealized_pnl >= 0 ? '+' : ''}{formatCurrency(metrics.unrealized_pnl)}
                 </span>
               </div>
               <div className="flex justify-between items-baseline mt-1">
-                <span className="text-xs text-gray-400">
+                <span className="text-xs text-gray-400 dark:text-gray-500">
                   {formatCurrency(metrics.current_value)} valor actual · {formatCurrency(metrics.total_invested)} invertido
                 </span>
-                <span className={`text-xs font-medium ${metrics.roi_unrealized >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <span className={`text-xs font-medium ${metrics.roi_unrealized >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.roi_unrealized >= 0 ? '+' : ''}{metrics.roi_unrealized.toFixed(2)}%
                 </span>
               </div>
             </div>
 
             {/* Premiums */}
-            <div className="mb-3 pb-3 border-b border-blue-200">
+            <div className="mb-3 pb-3 border-b border-blue-200 dark:border-blue-700/50">
               <div className="flex justify-between items-baseline">
-                <span className="text-sm text-gray-600">Premiums netos (opciones)</span>
-                <span className={`text-base font-bold ${metrics.total_premium >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <span className="text-sm text-gray-600 dark:text-gray-300">Premiums netos (opciones)</span>
+                <span className={`text-base font-bold ${metrics.total_premium >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.total_premium >= 0 ? '+' : ''}{formatCurrency(metrics.total_premium)}
                 </span>
               </div>
-              <p className="text-xs text-gray-400 mt-1">Todas las posiciones, históricas y actuales</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Todas las posiciones, históricas y actuales</p>
             </div>
 
             {/* Realized stocks */}
-            <div className="mb-4 pb-3 border-b border-blue-200">
+            <div className="mb-4 pb-3 border-b border-blue-200 dark:border-blue-700/50">
               <div className="flex justify-between items-baseline">
-                <span className="text-sm text-gray-600">Realizado en acciones (ventas)</span>
-                <span className={`text-base font-bold ${metrics.realized_stock_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <span className="text-sm text-gray-600 dark:text-gray-300">Realizado en acciones (ventas)</span>
+                <span className={`text-base font-bold ${metrics.realized_stock_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.realized_stock_pnl >= 0 ? '+' : ''}{formatCurrency(metrics.realized_stock_pnl)}
                 </span>
               </div>
-              <p className="text-xs text-gray-400 mt-1">Ganancias/pérdidas de acciones vendidas</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Ganancias/pérdidas de acciones vendidas</p>
             </div>
 
             {/* Net total */}
-            <div className="bg-white rounded-lg px-4 py-3 flex justify-between items-center">
+            <div className="bg-white dark:bg-gray-700 rounded-lg px-4 py-3 flex justify-between items-center">
               <div>
-                <p className="text-sm font-semibold text-gray-700">P&amp;L Neto Total</p>
-                <p className="text-xs text-gray-400">
+                <p className="text-sm font-semibold text-gray-700 dark:text-gray-200">P&amp;L Neto Total</p>
+                <p className="text-xs text-gray-400 dark:text-gray-400">
                   ROI sobre {formatCurrency(metrics.total_capital_deployed)} capital desplegado
                 </p>
               </div>
               <div className="text-right">
-                <p className={`text-xl font-bold ${metrics.net_total_pnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <p className={`text-xl font-bold ${metrics.net_total_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.net_total_pnl >= 0 ? '+' : ''}{formatCurrency(metrics.net_total_pnl)}
                 </p>
-                <p className={`text-sm font-semibold ${metrics.roi_net_total >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                <p className={`text-sm font-semibold ${metrics.roi_net_total >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
                   {metrics.roi_net_total >= 0 ? '+' : ''}{metrics.roi_net_total.toFixed(2)}%
                 </p>
               </div>
@@ -620,41 +620,41 @@ function Dashboard() {
           </div>
 
           {/* ── Mejor y Peor Posición ────────────────────────────────────── */}
-          <div className="bg-white overflow-hidden shadow rounded-lg p-6">
-            <h3 className="text-lg font-semibold text-gray-800 mb-1">Mejor y Peor Posición</h3>
-            <p className="text-xs text-gray-500 mb-4">Rendimiento vs. costo base ajustado por premiums recibidos</p>
+          <div className="bg-white dark:bg-gray-800 overflow-hidden shadow rounded-lg p-6">
+            <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-100 mb-1">Mejor y Peor Posición</h3>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">Rendimiento vs. costo base ajustado por premiums recibidos</p>
             {metrics.best_position && (
-              <div className="mb-4 pb-4 border-b border-gray-100">
-                <p className="text-xs uppercase tracking-wide text-gray-400 mb-1">Mejor</p>
-                <p className="text-lg font-bold text-green-600">
+              <div className="mb-4 pb-4 border-b border-gray-100 dark:border-gray-700">
+                <p className="text-xs uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Mejor</p>
+                <p className="text-lg font-bold text-green-600 dark:text-green-400">
                   {metrics.best_position.ticker} +{metrics.best_position.pnl_pct.toFixed(2)}%
                 </p>
-                <p className="text-sm text-gray-500">{formatCurrency(metrics.best_position.pnl)} no realizado</p>
-                <p className="text-xs text-gray-400 mt-1">
+                <p className="text-sm text-gray-500 dark:text-gray-400">{formatCurrency(metrics.best_position.pnl)} no realizado</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   {metrics.best_position.shares} acc · precio actual {formatCurrency(metrics.best_position.current_price)} · costo ajustado {formatCurrency(metrics.best_position.adjusted_cost_basis)}
                 </p>
               </div>
             )}
             {metrics.worst_position && (
               <div>
-                <p className="text-xs uppercase tracking-wide text-gray-400 mb-1">Peor</p>
-                <p className="text-lg font-bold text-red-600">
+                <p className="text-xs uppercase tracking-wide text-gray-400 dark:text-gray-500 mb-1">Peor</p>
+                <p className="text-lg font-bold text-red-600 dark:text-red-400">
                   {metrics.worst_position.ticker} {metrics.worst_position.pnl_pct.toFixed(2)}%
                 </p>
-                <p className="text-sm text-gray-500">{formatCurrency(metrics.worst_position.pnl)} no realizado</p>
-                <p className="text-xs text-gray-400 mt-1">
+                <p className="text-sm text-gray-500 dark:text-gray-400">{formatCurrency(metrics.worst_position.pnl)} no realizado</p>
+                <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                   {metrics.worst_position.shares} acc · precio actual {formatCurrency(metrics.worst_position.current_price)} · costo ajustado {formatCurrency(metrics.worst_position.adjusted_cost_basis)}
                 </p>
               </div>
             )}
-            <div className="mt-6 pt-4 border-t border-gray-100 grid grid-cols-2 gap-3">
-              <div className="bg-gray-50 rounded p-3 text-center">
-                <p className="text-xs text-gray-500">Posiciones activas</p>
-                <p className="text-xl font-bold text-gray-800">{metrics.total_positions}</p>
+            <div className="mt-6 pt-4 border-t border-gray-100 dark:border-gray-700 grid grid-cols-2 gap-3">
+              <div className="bg-gray-50 dark:bg-gray-700 rounded p-3 text-center">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Posiciones activas</p>
+                <p className="text-xl font-bold text-gray-800 dark:text-gray-100">{metrics.total_positions}</p>
               </div>
-              <div className="bg-gray-50 rounded p-3 text-center">
-                <p className="text-xs text-gray-500">Opciones abiertas</p>
-                <p className="text-xl font-bold text-gray-800">{metrics.active_options}</p>
+              <div className="bg-gray-50 dark:bg-gray-700 rounded p-3 text-center">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Opciones abiertas</p>
+                <p className="text-xl font-bold text-gray-800 dark:text-gray-100">{metrics.active_options}</p>
               </div>
             </div>
           </div>

@@ -43,11 +43,12 @@ def get_dashboard_summary(
         else:
             current_portfolio_value += stock.total_invested
     
-    # Opciones abiertas del usuario
-    open_options = db.query(Option).join(Stock).filter(
+    # Opciones abiertas: suma de contratos (no cantidad de registros)
+    from sqlalchemy import func as _func
+    open_options = db.query(_func.coalesce(_func.sum(Option.contracts), 0)).join(Stock).filter(
         Stock.user_id == current_user.id,
         Option.status == OptionStatus.OPEN
-    ).count()
+    ).scalar() or 0
     
     # P&L realizado de ventas de acciones usando costo promedio histórico
     from collections import defaultdict

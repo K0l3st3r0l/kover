@@ -26,6 +26,8 @@ interface Cycle {
   notes: string
   is_roll: boolean
   roll_group: number
+  option_type: 'CALL' | 'PUT'
+  strategy: 'COVERED_CALL' | 'CASH_SECURED_PUT'
 }
 
 interface RollGroup {
@@ -100,7 +102,7 @@ function CoveredCallCycles() {
   if (!data || data.cycles.length === 0) {
     return (
       <div className="flex items-center justify-center h-40 text-gray-500 dark:text-gray-400">
-        No hay ciclos de covered calls registrados aún.
+        No hay ciclos de opciones registrados aún.
       </div>
     )
   }
@@ -322,6 +324,7 @@ function CoveredCallCycles() {
             <tr className="text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide border-b border-gray-200 dark:border-gray-700">
               <th className="pb-2 pr-2">#</th>
               <th className="pb-2 pr-3">Ticker</th>
+              <th className="pb-2 pr-2">Tipo</th>
               <th className="pb-2 pr-3">Apertura</th>
               <th className="pb-2 pr-3">Cierre / Vence</th>
               <th className="pb-2 pr-3 text-right">Días</th>
@@ -360,6 +363,11 @@ function CoveredCallCycles() {
                           </div>
                         </td>
                         <td className="py-2 pr-3 font-semibold text-gray-900 dark:text-gray-100">{c.ticker}</td>
+                        <td className="py-2 pr-2">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${c.option_type === 'CALL' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' : 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'}`}>
+                            {c.option_type === 'CALL' ? 'C' : 'P'}
+                          </span>
+                        </td>
                         <td className="py-2 pr-3 text-gray-500 dark:text-gray-400 text-xs">{c.opened_at}</td>
                         <td className="py-2 pr-3 text-gray-500 dark:text-gray-400 text-xs">
                           {c.end_date}{c.status === 'OPEN' && <span className="ml-1 text-green-600">(exp.)</span>}
@@ -387,6 +395,7 @@ function CoveredCallCycles() {
                       <span className="font-bold text-gray-900 dark:text-gray-100">{rg.ticker}</span>
                       <span className="ml-1.5 text-xs text-amber-600 dark:text-amber-400">roll ×{rg.n_rolls}</span>
                     </td>
+                    <td className="py-2 pr-2"></td>
                     <td className="py-2 pr-3 text-xs text-gray-500">{rg.first_opened}</td>
                     <td className="py-2 pr-3 text-xs text-gray-500">
                       {rg.last_end}

@@ -31,6 +31,10 @@ FINNHUB_KEY       = os.getenv("FINNHUB_KEY", "")
 _price_cache: Dict[str, tuple] = {}
 CACHE_TTL = 300  # 5 min
 
+# News cache: { ticker: ([items], timestamp) }
+_news_cache: Dict[str, tuple] = {}
+NEWS_CACHE_TTL = 900  # 15 min
+
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -241,6 +245,57 @@ def _price_finnhub(ticker: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# News helpers
+# ---------------------------------------------------------------------------
+
+def _parse_yf_news(item: Dict, ticker: str) -> Optional[Dict]:
+    """Normalize a yfinance news item; handles old and new API formats."""
+    try:
+        if "content" in item:
+            content = item.get("content") or {}
+            thumb = None
+            if content.get("thumbnail"):
+                resolutions = (content["thumbnail"] or {}).get("resolutions") or []
+                if resolutions:
+                    thumb = resolutions[0].get("url")
+            return {
+                "id": item.get("id", ""),
+                "title": content.get("title", ""),
+                "summary": content.get("summary", ""),
+                "publisher": (content.get("provider") or {}).get("displayName", ""),
+                "link": (content.get("canonicalUrl") or {}).get("url", ""),
+                "published_at": content.get("pubDate", ""),
+                "thumbnail": thumb,
+                "ticker": ticker,
+            }
+        else:
+            pub_ts = item.get("providerPublishTime")
+            published_at = ""
+            if pub_ts:
+                try:
+                    published_at = datetime.fromtimestamp(int(pub_ts)).isoformat()
+                except Exception:
+                    pass
+            thumb = None
+            if item.get("thumbnail"):
+                resolutions = (item["thumbnail"] or {}).get("resolutions") or []
+                if resolutions:
+                    thumb = resolutions[0].get("url")
+            return {
+                "id": item.get("uuid", ""),
+                "title": item.get("title", ""),
+                "summary": "",
+                "publisher": item.get("publisher", ""),
+                "link": item.get("link", ""),
+                "published_at": published_at,
+                "thumbnail": thumb,
+                "ticker": ticker,
+            }
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Public Service
 # ---------------------------------------------------------------------------
 
@@ -393,3 +448,123 @@ class MarketDataService:
         except Exception as e:
             print(f"[yfinance] expirations error for {ticker}: {e}")
         return []
+
+    # --- News (with cache) -------------------------------------------------
+
+    @staticmethod
+    def get_ticker_news(ticker: str, limit: int = 10) -> List[Dict]:
+        ticker = ticker.upper()
+        entry = _news_cache.get(ticker)
+        if entry:
+            items, ts = entry
+            if time.time() - ts < NEWS_CACHE_TTL:
+                return items[:limit]
+        try:
+            raw = yf.Ticker(ticker).news or []
+            result = []
+            for item in raw:
+                parsed = _parse_yf_news(item, ticker)
+                if parsed:
+                    result.append(parsed)
+            _news_cache[ticker] = (result, time.time())
+            return result[:limit]
+        except Exception as e:
+            print(f"[yfinance] news error for {ticker}: {e}")
+        return []
+
+    @staticmethod
+    def get_chile_market_news(limit: int = 25) -> List[Dict]:
+        """Fetch Chilean market news from Google News RSS."""
+        cache_key = "__chile__"
+        entry = _news_cache.get(cache_key)
+        if entry:
+            items, ts = entry
+            if time.time() - ts < NEWS_CACHE_TTL:
+                return items[:limit]
+        try:
+            import xml.etree.ElementTree as ET
+            url = (
+                "https://news.google.com/rss/search"
+                "?q=bolsa+chile+mercado+acciones+economia"
+                "&hl=es-419&gl=CL&ceid=CL:es-419"
+            )
+            resp = requests.get(url, headers=_HEADERS, timeout=10)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            channel = root.find("channel")
+            if channel is None:
+                return []
+            items_xml = channel.findall("item")
+            result = []
+            for item in items_xml:
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                pub_date = (item.findtext("pubDate") or "").strip()
+                source_el = item.find("source")
+                publisher = source_el.text if source_el is not None else "Google News"
+                result.append({
+                    "id": link,
+                    "title": title,
+                    "summary": "",
+                    "publisher": publisher,
+                    "link": link,
+                    "published_at": pub_date,
+                    "thumbnail": None,
+                    "ticker": "CL",
+                })
+            _news_cache[cache_key] = (result, time.time())
+            return result[:limit]
+        except Exception as e:
+            print(f"[chile_news] error: {e}")
+        return []
+
+    # --- Dividend info -----------------------------------------------------
+
+    @staticmethod
+    def get_dividend_info(ticker: str) -> Optional[Dict]:
+        ticker = ticker.upper()
+        try:
+            t = yf.Ticker(ticker)
+            info = t.info
+
+            # ex-dividend date (unix timestamp in yfinance info)
+            ex_ts = info.get("exDividendDate")
+            ex_date = None
+            if ex_ts:
+                try:
+                    ex_date = datetime.fromtimestamp(int(ex_ts)).strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
+            # Historical dividends — last 8 payments
+            recent_dividends: List[Dict] = []
+            try:
+                hist = t.dividends
+                if not hist.empty:
+                    for dt, amt in hist.tail(8).items():
+                        recent_dividends.append({
+                            "date": dt.strftime("%Y-%m-%d"),
+                            "amount": round(float(amt), 4),
+                        })
+                    recent_dividends.reverse()
+            except Exception:
+                pass
+
+            return {
+                "ticker": ticker,
+                "company_name": info.get("longName") or info.get("shortName") or ticker,
+                "dividend_yield": info.get("dividendYield"),
+                "dividend_rate": info.get("dividendRate"),
+                "ex_dividend_date": ex_date,
+                "payout_ratio": info.get("payoutRatio"),
+                "five_year_avg_yield": info.get("fiveYearAvgDividendYield"),
+                "trailing_annual_dividend_yield": info.get("trailingAnnualDividendYield"),
+                "trailing_annual_dividend_rate": info.get("trailingAnnualDividendRate"),
+                "recent_dividends": recent_dividends,
+                "pays_dividend": bool(
+                    info.get("dividendRate") or info.get("trailingAnnualDividendRate")
+                ),
+            }
+        except Exception as e:
+            print(f"[yfinance] dividend info error for {ticker}: {e}")
+        return None
