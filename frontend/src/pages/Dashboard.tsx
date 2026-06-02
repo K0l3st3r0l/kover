@@ -79,7 +79,10 @@ interface CCByTicker {
     shares: number
     avg_cost: number
     capital: number
+    capital_historico: number
     yield_pct: number
+    yield_historico_pct: number
+    is_active: boolean
   }>
   total_primas_cobradas: number
   total_cierres: number
@@ -889,10 +892,18 @@ function Dashboard() {
                       {formatCurrency(row.prima_neta)}
                     </td>
                     <td className="py-3 px-3 text-right text-gray-600 dark:text-gray-300">
-                      {row.capital > 0 ? formatCurrency(row.capital) : '—'}
+                      {row.is_active
+                        ? formatCurrency(row.capital)
+                        : row.capital_historico > 0
+                          ? <span className="text-gray-400 dark:text-gray-500 italic text-xs" title="Capital histórico invertido (posición cerrada)">{formatCurrency(row.capital_historico)}</span>
+                          : '—'}
                     </td>
-                    <td className={`py-3 px-3 text-right font-semibold ${row.yield_pct >= 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-500'}`}>
-                      {row.capital > 0 ? `${row.yield_pct.toFixed(1)}%` : '—'}
+                    <td className={`py-3 px-3 text-right font-semibold`}>
+                      {row.is_active && row.yield_pct !== 0
+                        ? <span className={row.yield_pct >= 0 ? 'text-blue-600 dark:text-blue-400' : 'text-red-500'}>{row.yield_pct.toFixed(1)}%</span>
+                        : !row.is_active && row.yield_historico_pct !== 0
+                          ? <span className="text-amber-500 dark:text-amber-400" title="Yield sobre capital histórico (posición cerrada)">~{row.yield_historico_pct.toFixed(1)}%</span>
+                          : '—'}
                     </td>
                     <td className="py-3 pl-3 text-right text-gray-500 dark:text-gray-400">
                       {row.n_ventas}v / {row.n_cierres}c

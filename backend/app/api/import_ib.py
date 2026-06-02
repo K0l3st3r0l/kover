@@ -249,7 +249,11 @@ def parse_float(value: str) -> float:
                 normalized = normalized.replace(",", "")
         elif "," in normalized:
             whole, decimal = normalized.rsplit(",", 1)
-            if decimal.isdigit() and len(decimal) <= 2:
+            # European decimal separator: 1-2 digits (e.g. "1,50") or 4+ digits
+            # (e.g. "1268,1375" from IB 4-decimal exports). US thousands groups
+            # are always exactly 3 digits (e.g. "1,268"), so treat 3-digit suffix
+            # as a thousands separator and remove the comma.
+            if decimal.isdigit() and (len(decimal) <= 2 or len(decimal) >= 4):
                 normalized = f"{whole.replace('.', '')}.{decimal}"
             else:
                 normalized = normalized.replace(",", "")
@@ -735,6 +739,11 @@ def build_parsed_transactions(
             # Advertir si precio es 0
             if precio == 0 and tipo not in (TransactionType.DIVIDEND, TransactionType.ASSIGNMENT):
                 advertencia = "Precio T. Price = 0, verifica el registro."
+            # Advertir si total_usd difiere significativamente de cantidad × precio
+            elif precio > 0 and cantidad > 0:
+                expected = cantidad * precio * (100 if "option" in asset_cat.lower() else 1)
+                if total_usd > 0 and (total_usd / expected > 10 or expected / total_usd > 10):
+                    advertencia = f"Total ${total_usd:,.2f} difiere mucho de qty×precio (${expected:,.2f}). Posible error de formato en el CSV."
 
         comision = abs(raw.get("comm_fee", 0.0))
 
@@ -856,10 +865,25 @@ async def confirm_import(
         avg_cost = (total_cost_bought / total_shares_bought) if total_shares_bought > 0 else 0.0
 
         if existing_stock:
-            # Actualizar posición existente (weighted average)
+            # Actualizar posición existente
             if total_shares_bought > 0:
-                prev_total = existing_stock.shares * existing_stock.average_cost
-                new_total = existing_stock.shares + total_shares_bought
+                # Determinar si la posición quedó completamente cerrada por las ventas de este lote
+                # (mismo batch: ej. assignment + nueva compra en el mismo extracto)
+                position_fully_closed = (
+                    existing_stock.shares == 0 or
+                    total_shares_sold >= existing_stock.shares
+                )
+                if position_fully_closed:
+                    # Nuevo ciclo: el premium del ciclo anterior ya fue realizado
+                    # al venderse/ejercerse las acciones. Partir de cero.
+                    existing_stock.total_premium_earned = 0
+                    prev_total = 0.0
+                    effective_base_shares = 0
+                else:
+                    prev_total = existing_stock.shares * existing_stock.average_cost
+                    effective_base_shares = existing_stock.shares
+
+                new_total = effective_base_shares + total_shares_bought
                 if new_total > 0:
                     new_avg = (prev_total + total_cost_bought) / new_total
                     existing_stock.average_cost = round(new_avg, 4)

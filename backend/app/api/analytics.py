@@ -1024,11 +1024,26 @@ async def get_cc_by_ticker(
             by_ticker[ticker]["cierres"] += tx.total_amount
             by_ticker[ticker]["n_cierres"] += 1
 
+    # capital histórico por ticker (suma de compras BUY_STOCK) para posiciones cerradas
+    buy_txs = db.query(Transaction).filter(
+        Transaction.user_id == current_user.id,
+        Transaction.transaction_type == TransactionType.BUY_STOCK,
+        Transaction.ticker.in_(list(by_ticker.keys()))
+    ).all()
+    capital_historico_by_ticker: dict[str, float] = {}
+    for tx in buy_txs:
+        capital_historico_by_ticker[tx.ticker] = capital_historico_by_ticker.get(tx.ticker, 0.0) + tx.total_amount
+
     result = []
     for d in by_ticker.values():
         stk = all_stocks.get(d["ticker"])
-        capital = (stk.shares * stk.average_cost) if stk and stk.shares > 0 else 0.0
+        is_active = stk is not None and stk.shares > 0
+        capital = (stk.shares * stk.average_cost) if is_active else 0.0
+        capital_hist = capital_historico_by_ticker.get(d["ticker"], 0.0)
         prima_neta = d["primas_cobradas"] - d["cierres"]
+
+        yield_pct = round((prima_neta / capital * 100), 2) if capital > 0 else 0
+        yield_historico_pct = round((prima_neta / capital_hist * 100), 2) if (not is_active and capital_hist > 0) else 0
 
         result.append({
             "ticker": d["ticker"],
@@ -1040,7 +1055,10 @@ async def get_cc_by_ticker(
             "shares": stk.shares if stk else 0,
             "avg_cost": round(stk.average_cost, 2) if stk else 0,
             "capital": round(capital, 2),
-            "yield_pct": round((prima_neta / capital * 100), 2) if capital > 0 else 0,
+            "capital_historico": round(capital_hist, 2),
+            "yield_pct": yield_pct,
+            "yield_historico_pct": yield_historico_pct,
+            "is_active": is_active,
         })
 
     result.sort(key=lambda x: x["prima_neta"], reverse=True)
