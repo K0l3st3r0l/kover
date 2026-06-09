@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
 from datetime import datetime
 from ..database import Base
 import bcrypt
@@ -12,6 +12,8 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     # Cash disponible en la cuenta de corretaje (actualizable manualmente)
     cash_balance = Column(Float, default=0.0, nullable=False)
+    # Distribución actual del usuario en fondos AFP (ej: {"A":0,"B":0,"C":0,"D":40,"E":60})
+    afp_allocation = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

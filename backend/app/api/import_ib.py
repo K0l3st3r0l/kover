@@ -125,12 +125,18 @@ MANUAL_COMMISSION_RE = re.compile(
     r"^(?:Comisiones?|Commission(?:s)?):\s*(?P<value>[-\d.,]+)$",
     re.IGNORECASE,
 )
+# Formato de expiración en tabla de Trades: 'EXPIRED 2 on OCC'
+MANUAL_EXPIRY_RE = re.compile(
+    r"^EXPIRED\s+(?P<qty>\d+)(?:\s+on\s+(?P<venue>.+))?$",
+    re.IGNORECASE,
+)
 MANUAL_STATUS_TOKENS = {
     "filled",
     "partially filled",
     "submitted",
     "cancelled",
     "pending",
+    "expired",
 }
 MANUAL_HEADER_TOKENS = {
     "TRADES",
@@ -208,14 +214,15 @@ def determine_transaction_type(asset_category: str, quantity: float, opt_type: O
 
 
 TIPO_LABELS = {
-    "BUY_STOCK":  "Compra Acción",
-    "SELL_STOCK": "Venta Acción",
-    "SELL_CALL":  "Prima Covered Call",
-    "BUY_CALL":   "Cierre Call",
-    "SELL_PUT":   "Prima Cash-Secured Put",
-    "BUY_PUT":    "Cierre Put",
-    "DIVIDEND":   "Dividendo",
-    "ASSIGNMENT": "Asignación",
+    "BUY_STOCK":     "Compra Acción",
+    "SELL_STOCK":    "Venta Acción",
+    "SELL_CALL":     "Prima Covered Call",
+    "BUY_CALL":      "Cierre Call",
+    "SELL_PUT":      "Prima Cash-Secured Put",
+    "BUY_PUT":       "Cierre Put",
+    "DIVIDEND":      "Dividendo",
+    "ASSIGNMENT":    "Asignación",
+    "OPTION_EXPIRY": "Expiración Opción",
 }
 
 
@@ -497,9 +504,59 @@ def split_manual_trade_blocks(content: str) -> list[tuple[int, list[str]]]:
     return blocks
 
 
+def _extract_dt_from_block(block: list[str], trade_date: str) -> Optional[datetime]:
+    """Extrae datetime del bloque: primero busca formato D/M/YYYY, luego solo hora."""
+    for line in block:
+        dm = MANUAL_DATETIME_RE.match(line)
+        if dm:
+            try:
+                day, month, year = int(dm.group("d")), int(dm.group("m")), int(dm.group("y"))
+                hm = dm.group("hm")
+                if len(hm.split(":")) == 2:
+                    hm = f"{hm}:00"
+                return datetime.strptime(f"{year:04d}-{month:02d}-{day:02d} {hm}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+            break
+    time_line = next((line for line in block if MANUAL_TIME_RE.match(line)), None)
+    time_value = time_line or "00:00:00"
+    if len(time_value.split(":")) == 2:
+        time_value = f"{time_value}:00"
+    return parse_ib_datetime(f"{trade_date} {time_value}")
+
+
 def parse_manual_trade_block(start_line: int, block: list[str], trade_date: str) -> tuple[Optional[dict], list[str]]:
     if not block or all(is_header_like_line(line) for line in block):
         return None, []
+
+    # ── Bloque de expiración: 'EXPIRED 2 on OCC' ──────────────────────────────
+    expiry_line = next((line for line in block if MANUAL_EXPIRY_RE.match(line)), None)
+    if expiry_line:
+        expiry_match = MANUAL_EXPIRY_RE.match(expiry_line)
+        qty = int(expiry_match.group("qty"))
+        if qty == 0:
+            return None, [f"Bloque desde línea {start_line}: cantidad 0 en expiración '{expiry_line}'."]
+
+        symbol_line = next((line for line in block if is_symbol_candidate(line)), None)
+        if not symbol_line:
+            return None, [f"Bloque desde línea {start_line}: no se pudo identificar el símbolo de la expiración."]
+
+        dt = _extract_dt_from_block(block, trade_date)
+        if not dt:
+            return None, [f"Bloque desde línea {start_line}: fecha/hora inválida en bloque de expiración."]
+
+        return {
+            "line": start_line,
+            "section": "OptionExpiry",
+            "asset_category": "Equity and Index Options",
+            "symbol": symbol_line,
+            "datetime_str": dt.strftime("%Y-%m-%d %H:%M:%S"),
+            "quantity": qty,
+            "t_price": 0.0,
+            "proceeds": 0.0,
+            "comm_fee": 0.0,
+            "description": f"Expiración | {symbol_line}",
+        }, []
 
     summary_line = next((line for line in block if MANUAL_SUMMARY_RE.match(line)), None)
     if not summary_line:
@@ -523,28 +580,7 @@ def parse_manual_trade_block(start_line: int, block: list[str], trade_date: str)
             f"Bloque desde línea {start_line}: status '{status_line}' no es final. Solo se importan operaciones ejecutadas (Filled)."
         ]
 
-    # Intentar extraer fecha+hora completa del bloque (ej: "8/5/2026, 9:42" formato europeo D/M/YYYY)
-    dt = None
-    for line in block:
-        dm = MANUAL_DATETIME_RE.match(line)
-        if dm:
-            try:
-                day, month, year = int(dm.group("d")), int(dm.group("m")), int(dm.group("y"))
-                hm = dm.group("hm")
-                if len(hm.split(":")) == 2:
-                    hm = f"{hm}:00"
-                dt = datetime.strptime(f"{year:04d}-{month:02d}-{day:02d} {hm}", "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                pass
-            break
-
-    if not dt:
-        time_line = next((line for line in block if MANUAL_TIME_RE.match(line)), None)
-        time_value = time_line or "00:00:00"
-        if len(time_value.split(":")) == 2:
-            time_value = f"{time_value}:00"
-        dt = parse_ib_datetime(f"{trade_date} {time_value}")
-
+    dt = _extract_dt_from_block(block, trade_date)
     if not dt:
         return None, [f"Bloque desde línea {start_line}: fecha/hora inválida."]
 
@@ -702,6 +738,23 @@ def build_parsed_transactions(
             precio = raw["t_price"]
             notas = raw.get("description", "Assignment IB")
 
+        # ── Expiración de opción sin valor ──────────────────────────────────
+        elif section == "OptionExpiry":
+            opt_info = parse_ib_option_symbol(symbol)
+            if not opt_info:
+                errors.append(f"Línea {line}: símbolo de opción no reconocido '{symbol}' – fila omitida")
+                continue
+            underlying, opt_type, strike, expiry = opt_info
+            ticker = underlying
+            tipo = TransactionType.OPTION_EXPIRY
+            total_usd = 0.0
+            cantidad = abs(raw["quantity"])
+            precio = 0.0
+            notas = f"Expiración | {symbol} | Strike ${strike} | Exp {expiry}"
+            _strike = strike
+            _expiry = expiry
+            _opt_type = opt_type
+
         # ── Trade (acción u opción) ─────────────────────────────────────────
         else:
             asset_cat = raw["asset_category"]
@@ -765,9 +818,9 @@ def build_parsed_transactions(
             notas=notas,
             advertencia=advertencia,
             duplicado=duplicado,
-            strike_price=_strike if section == "Trades" else None,
-            expiration_date=_expiry if section == "Trades" else None,
-            opt_type=_opt_type if section == "Trades" else None,
+            strike_price=_strike if section in ("Trades", "OptionExpiry") else None,
+            expiration_date=_expiry if section in ("Trades", "OptionExpiry") else None,
+            opt_type=_opt_type if section in ("Trades", "OptionExpiry") else None,
         ))
 
     return results, errors
@@ -963,7 +1016,7 @@ async def confirm_import(
             # Buscar stock_id si aplica
             stock_id = None
             if t.tipo in ("BUY_STOCK", "SELL_STOCK", "SELL_CALL", "BUY_CALL",
-                          "SELL_PUT", "BUY_PUT", "DIVIDEND", "ASSIGNMENT"):
+                          "SELL_PUT", "BUY_PUT", "DIVIDEND", "ASSIGNMENT", "OPTION_EXPIRY"):
                 stk = db.query(Stock).filter(
                     Stock.ticker == t.ticker,
                     Stock.user_id == current_user.id,
@@ -1085,7 +1138,42 @@ async def confirm_import(
                     # Acumular P&L realizado parcial en el campo realized_pnl
                     open_opt.realized_pnl = round((open_opt.realized_pnl or 0) + partial_pnl, 2)
 
-    # ── Fase 3.5: cerrar opciones asignadas ───────────────────────────
+    # ── Fase 3.5: marcar opciones expiradas ───────────────────────────
+    for t in to_import:
+        if t.tipo != "OPTION_EXPIRY":
+            continue
+        if not t.strike_price or not t.expiration_date:
+            continue
+
+        stk = db.query(Stock).filter(
+            Stock.ticker == t.ticker,
+            Stock.user_id == current_user.id,
+        ).first()
+        if not stk:
+            continue
+
+        try:
+            dt_exp = datetime.strptime(t.fecha, "%Y-%m-%d %H:%M:%S")
+            dt_exp_date = datetime.strptime(t.expiration_date, "%Y-%m-%d")
+        except ValueError:
+            continue
+
+        opt_type_enum = OptionType.CALL if t.opt_type == "C" else OptionType.PUT
+        open_opt = db.query(Option).filter(
+            Option.stock_id == stk.id,
+            Option.ticker == t.ticker,
+            Option.strike_price == t.strike_price,
+            Option.expiration_date == dt_exp_date,
+            Option.option_type == opt_type_enum,
+            Option.status == OptionStatus.OPEN,
+        ).first()
+        if open_opt:
+            open_opt.status = OptionStatus.EXPIRED
+            open_opt.closed_at = dt_exp
+            open_opt.closing_premium = 0.0
+            open_opt.realized_pnl = open_opt.total_premium
+
+    # ── Fase 3.6: cerrar opciones asignadas ───────────────────────────
     for t in to_import:
         if t.tipo != "ASSIGNMENT":
             continue
@@ -1222,6 +1310,17 @@ def rebuild_positions(
                 positions[ticker]["total_premium_earned"] = max(
                     0.0, positions[ticker]["total_premium_earned"] - amount
                 )
+
+        # OPTION_EXPIRY: la opción expiró sin valor — el premium completo ya fue ganado,
+        # no se descuenta nada (amount=0). Solo asegurar que el ticker esté en positions.
+        elif tt == TransactionType.OPTION_EXPIRY:
+            if ticker not in positions:
+                positions[ticker] = {
+                    "shares": 0.0,
+                    "total_cost": 0.0,
+                    "average_cost": 0.0,
+                    "total_premium_earned": 0.0,
+                }
 
     # ── 3. Actualizar o crear registros de stocks (upsert) ────────────────
     created = []

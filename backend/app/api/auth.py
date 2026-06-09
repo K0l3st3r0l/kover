@@ -81,6 +81,33 @@ def get_me(current_user: User = Depends(get_current_user)):
         "username": current_user.username
     }
 
+class AfpAllocationUpdate(BaseModel):
+    allocation: dict
+
+@router.get("/afp-allocation")
+def get_afp_allocation(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna la distribución actual en fondos AFP del usuario"""
+    user = db.query(User).filter(User.id == current_user.id).first()
+    return {"allocation": user.afp_allocation}
+
+@router.put("/afp-allocation")
+def update_afp_allocation(
+    data: AfpAllocationUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Actualiza la distribución actual en fondos AFP del usuario"""
+    user = db.query(User).filter(User.id == current_user.id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    user.afp_allocation = data.allocation
+    db.commit()
+    db.refresh(user)
+    return {"allocation": user.afp_allocation}
+
 class ChangePassword(BaseModel):
     current_password: str
     new_password: str

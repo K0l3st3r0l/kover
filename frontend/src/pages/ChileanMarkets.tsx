@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import {
   LineChart,
   BarChart,
@@ -94,6 +94,8 @@ export default function ChileanMarkets() {
     } catch { return { A: 0, B: 0, C: 0, D: 0, E: 100 } }
   })
   const [editingAllocation, setEditingAllocation] = useState(false)
+  const saveAllocationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSavedRef = useRef<string>(JSON.stringify(currentAllocation))
 
   const fetchAFP = useCallback(async (days: number) => {
     setAfpLoading(true)
@@ -141,7 +143,42 @@ export default function ChileanMarkets() {
 
   useEffect(() => {
     try { localStorage.setItem('afp-current-allocation', JSON.stringify(currentAllocation)) } catch {}
+
+    // Persistir en backend (debounced 600ms) — fuente de verdad para que la posición
+    // se mantenga entre dispositivos y sesiones de login.
+    const serialized = JSON.stringify(currentAllocation)
+    if (serialized === lastSavedRef.current) return
+    if (saveAllocationTimerRef.current) clearTimeout(saveAllocationTimerRef.current)
+    saveAllocationTimerRef.current = setTimeout(async () => {
+      try {
+        await api.put('/api/auth/afp-allocation', { allocation: currentAllocation })
+        lastSavedRef.current = serialized
+      } catch {
+        // silencioso: si falla (no auth, red), localStorage sigue siendo cache
+      }
+    }, 600)
+    return () => {
+      if (saveAllocationTimerRef.current) clearTimeout(saveAllocationTimerRef.current)
+    }
   }, [currentAllocation])
+
+  // Cargar desde backend al montar — el backend pisa localStorage si tiene valor.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await api.get<{ allocation: Record<string, number> | null }>('/api/auth/afp-allocation')
+        if (cancelled) return
+        if (res.data?.allocation && Object.keys(res.data.allocation).length > 0) {
+          setCurrentAllocation(res.data.allocation)
+          lastSavedRef.current = JSON.stringify(res.data.allocation)
+        }
+      } catch {
+        // sin token o sin backend: mantener lo que haya en localStorage
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   // Full-history data for signal computation (independent of display period)
   const fetchSignalData = useCallback(async () => {

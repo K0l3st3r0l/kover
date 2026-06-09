@@ -11,6 +11,7 @@ class TransactionType(str, enum.Enum):
     SELL_PUT = "SELL_PUT"
     BUY_PUT = "BUY_PUT"  # Para cerrar posición
     ASSIGNMENT = "ASSIGNMENT"  # Cuando te asignan
+    OPTION_EXPIRY = "OPTION_EXPIRY"  # Opción expira sin valor
     DIVIDEND = "DIVIDEND"
     DEPOSIT = "DEPOSIT"      # Depósito de efectivo a la cuenta
     WITHDRAWAL = "WITHDRAWAL"  # Retiro de efectivo de la cuenta
