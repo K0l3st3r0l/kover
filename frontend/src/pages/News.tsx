@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import api from '../services/api'
+import MacroPanel from '../components/MacroPanel'
 
 interface NewsItem {
   id: string
@@ -321,6 +322,9 @@ export default function News() {
           </button>
         </div>
       </div>
+
+      {/* Macro context panel — feeds AI analysis */}
+      <MacroPanel />
 
       {/* AI Analysis panel */}
       {(showAnalysis || analysisLoading || analysisError) && (

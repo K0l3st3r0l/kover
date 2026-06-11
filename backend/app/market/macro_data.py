@@ -1,0 +1,447 @@
+"""
+MacroDataService — Indicadores económicos actuales y calendario de eventos.
+
+Fuentes:
+  - mindicador.cl (Banco Central de Chile / INE) — sin auth, JSON público
+  - yfinance (DXY, oro, petróleo, 10y, VIX) — sin auth
+
+Calendario:
+  - Curado de eventos macro recurrentes high-impact (FOMC, NFP, CPI, IPC CL, etc.)
+  - Calcula la próxima fecha de ocurrencia según reglas conocidas.
+  - Marca cuáles salen "hoy", "mañana" o "esta semana".
+"""
+
+import time
+import requests
+from datetime import datetime, date, timedelta
+from typing import Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Config & cache
+# ---------------------------------------------------------------------------
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+}
+
+MINDICADOR_BASE = "https://mindicador.cl/api"
+
+# Indicadores CL desde mindicador
+# freq: "daily" -> cambio vs día anterior
+#       "monthly" -> cambio vs el valor del mes anterior (ya viene en %)
+#       "level" -> cambio vs medición anterior (mes anterior para TPM, etc.)
+CL_INDICATORS = [
+    {"key": "uf",          "name": "UF",                  "country": "CL", "format": "currency", "freq": "daily"},
+    {"key": "utm",         "name": "UTM",                 "country": "CL", "format": "currency", "freq": "monthly"},
+    {"key": "ivp",         "name": "IVP",                 "country": "CL", "format": "currency", "freq": "daily"},
+    {"key": "ipc",         "name": "IPC (var. % m/m)",    "country": "CL", "format": "percent",  "freq": "monthly"},
+    {"key": "tpm",         "name": "TPM",                 "country": "CL", "format": "percent",  "freq": "level"},
+    {"key": "imacec",      "name": "Imacec (var. %)",     "country": "CL", "format": "percent",  "freq": "monthly"},
+    {"key": "dolar",       "name": "USD/CLP",             "country": "CL", "format": "currency", "freq": "daily"},
+    {"key": "euro",        "name": "EUR/CLP",             "country": "CL", "format": "currency", "freq": "daily"},
+    {"key": "libra_cobre", "name": "Cobre (USD/lb)",      "country": "CL", "format": "commodity","freq": "daily"},
+]
+
+# Indicadores US vía yfinance (ticker, nombre, formato)
+US_TICKERS = [
+    {"ticker": "DX-Y.NYB", "name": "DXY (USD Index)",  "country": "US", "format": "index"},
+    {"ticker": "GC=F",     "name": "Oro (futuro)",     "country": "US", "format": "commodity"},
+    {"ticker": "CL=F",     "name": "Petróleo WTI",     "country": "US", "format": "commodity"},
+    {"ticker": "^TNX",     "name": "US 10Y Yield (%)", "country": "US", "format": "percent"},
+    {"ticker": "^VIX",     "name": "VIX",              "country": "US", "format": "index"},
+]
+
+# Cache
+_macro_cache: Dict[str, tuple] = {}
+MACRO_CACHE_TTL = 1800  # 30 min — los indicadores no cambian cada segundo
+
+
+def _cached(key: str):
+    entry = _macro_cache.get(key)
+    if entry:
+        data, ts = entry
+        if time.time() - ts < MACRO_CACHE_TTL:
+            return data
+    return None
+
+
+def _set_cache(key: str, data):
+    _macro_cache[key] = (data, time.time())
+
+
+# ---------------------------------------------------------------------------
+# Indicadores Chile — mindicador.cl
+# ---------------------------------------------------------------------------
+
+def _fetch_cl_indicators() -> List[Dict]:
+    """Trae el último valor de cada indicador CL desde mindicador.cl."""
+    results: List[Dict] = []
+    for ind in CL_INDICATORS:
+        try:
+            resp = requests.get(
+                f"{MINDICADOR_BASE}/{ind['key']}",
+                headers=_HEADERS,
+                timeout=6,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            serie = data.get("serie") or []
+            if not serie:
+                continue
+            latest = serie[0]
+            prev = serie[1] if len(serie) > 1 else None
+            valor = latest.get("valor")
+            fecha = (latest.get("fecha") or "")[:10]
+
+            freq = ind.get("freq", "daily")
+            # Para series mensuales (IPC, Imacec, UTM) y de nivel (TPM),
+            # el cambio día-a-día no es significativo: solo lo calculamos
+            # para series diarias, y omitimos para las demás.
+            if freq == "daily":
+                valor_anterior = prev.get("valor") if prev else None
+                cambio_pct = None
+                if valor is not None and valor_anterior and valor_anterior != 0:
+                    cambio_pct = round((valor - valor_anterior) / valor_anterior * 100, 2)
+            else:
+                valor_anterior = None
+                cambio_pct = None
+
+            results.append({
+                "key": ind["key"],
+                "name": ind["name"],
+                "country": ind["country"],
+                "format": ind["format"],
+                "value": valor,
+                "previous": valor_anterior,
+                "change_pct": cambio_pct,
+                "as_of": fecha,
+            })
+        except Exception as e:
+            print(f"[macro] mindicador {ind['key']} error: {e}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Indicadores US — yfinance
+# ---------------------------------------------------------------------------
+
+def _fetch_us_indicators() -> List[Dict]:
+    """Trae el último valor de los tickers US macro vía yfinance."""
+    import yfinance as yf
+
+    results: List[Dict] = []
+    for ind in US_TICKERS:
+        try:
+            t = yf.Ticker(ind["ticker"])
+            hist = t.history(period="5d")
+            if hist.empty:
+                continue
+            latest = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) > 1 else None
+            as_of = hist.index[-1].strftime("%Y-%m-%d")
+            cambio_pct = None
+            if prev and float(prev) != 0:
+                cambio_pct = round((float(latest) - float(prev)) / float(prev) * 100, 2)
+            results.append({
+                "key": ind["ticker"],
+                "name": ind["name"],
+                "country": ind["country"],
+                "format": ind["format"],
+                "value": round(float(latest), 4),
+                "previous": round(float(prev), 4) if prev is not None else None,
+                "change_pct": cambio_pct,
+                "as_of": as_of,
+            })
+        except Exception as e:
+            print(f"[macro] yfinance {ind['ticker']} error: {e}")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Calendario económico curado
+# ---------------------------------------------------------------------------
+# Reglas: cada evento se repite según un patrón conocido. Calculamos la próxima
+# fecha a partir de hoy y marcamos si es hoy / mañana / esta semana.
+
+# (id, nombre, país, importancia 1-3, día_semana regla, día_mes regla, hora_approx CL)
+# day_of_week: 0=lun, 4=vie  |  day_of_month: si None, se calcula
+# week_of_month: None | "first" | "second" | "third" | "last"
+
+_RECURRING_EVENTS = [
+    {
+        "id": "fomc",
+        "name": "Decisión de Tasas FOMC",
+        "country": "US",
+        "impact": 3,
+        "category": "tasas",
+        "week_of_month": "third",
+        "day_of_week": 2,  # miércoles
+        "hour_cl": "15:00",
+    },
+    {
+        "id": "fomc_minutes",
+        "name": "Minutas FOMC",
+        "country": "US",
+        "impact": 2,
+        "category": "tasas",
+        "week_of_month": "third",
+        "day_of_week": 3,  # jueves siguiente al FOMC
+        "hour_cl": "15:00",
+    },
+    {
+        "id": "nfp",
+        "name": "Non-Farm Payrolls (NFP)",
+        "country": "US",
+        "impact": 3,
+        "category": "empleo",
+        "week_of_month": "first",
+        "day_of_week": 4,  # primer viernes
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "cpi_us",
+        "name": "CPI EE.UU. (inflación)",
+        "country": "US",
+        "impact": 3,
+        "category": "inflacion",
+        "week_of_month": "second",
+        "day_of_week": 2,  # segundo o tercer martes
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "pce_us",
+        "name": "PCE Deflator (Fed preferido)",
+        "country": "US",
+        "impact": 3,
+        "category": "inflacion",
+        "week_of_month": "last",
+        "day_of_week": 4,  # último viernes
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "ppi_us",
+        "name": "PPI EE.UU.",
+        "country": "US",
+        "impact": 2,
+        "category": "inflacion",
+        "week_of_month": "second",
+        "day_of_week": 2,  # martes siguiente al CPI
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "retail_us",
+        "name": "Ventas Minoristas EE.UU.",
+        "country": "US",
+        "impact": 2,
+        "category": "consumo",
+        "week_of_month": "second",
+        "day_of_week": 3,
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "gdp_us",
+        "name": "PIB EE.UU. (estimación)",
+        "country": "US",
+        "impact": 2,
+        "category": "crecimiento",
+        "week_of_month": "last",
+        "day_of_week": 3,  # jueves
+        "hour_cl": "09:30",
+    },
+    {
+        "id": "ipc_cl",
+        "name": "IPC Chile (inflación)",
+        "country": "CL",
+        "impact": 3,
+        "category": "inflacion",
+        "day_of_month": 8,  # aprox día 8 de cada mes
+        "hour_cl": "09:00",
+    },
+    {
+        "id": "tpm_cl",
+        "name": "TPM — Reunión BCCh",
+        "country": "CL",
+        "impact": 3,
+        "category": "tasas",
+        "day_of_month": 26,  # aprox fin de mes
+        "hour_cl": "18:00",
+    },
+    {
+        "id": "imacec_cl",
+        "name": "Imacec Chile",
+        "country": "CL",
+        "impact": 2,
+        "category": "crecimiento",
+        "day_of_month": 6,
+        "hour_cl": "09:00",
+    },
+]
+
+
+def _nth_weekday(year: int, month: int, weekday: int, n: int) -> date:
+    """Devuelve la fecha del n-ésimo weekday del mes (n=1..4 o -1=último)."""
+    if n == -1:  # último
+        if month == 12:
+            last_day = (date(year + 1, 1, 1) - timedelta(days=1)).day
+        else:
+            last_day = (date(year, month + 1, 1) - timedelta(days=1)).day
+        d = date(year, month, last_day)
+        while d.weekday() != weekday:
+            d -= timedelta(days=1)
+        return d
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + (n - 1) * 7)
+
+
+def _next_occurrence(ev: Dict, today: date) -> date:
+    """Calcula la próxima fecha del evento a partir de hoy."""
+    year, month = today.year, today.month
+    candidates: List[date] = []
+
+    if "day_of_month" in ev and ev["day_of_month"] is not None:
+        # Regla fija por día del mes
+        for ym in [(year, month), (year + (1 if month == 12 else 0), 1 if month == 12 else month + 1)]:
+            try:
+                d = date(ym[0], ym[1], ev["day_of_month"])
+                if d >= today:
+                    candidates.append(d)
+            except ValueError:
+                pass
+    else:
+        # Regla por nth-weekday
+        n_map = {"first": 1, "second": 2, "third": 3, "last": -1}
+        n = n_map.get(ev.get("week_of_month", "first"), 1)
+        for ym in [(year, month), (year + (1 if month == 12 else 0), 1 if month == 12 else month + 1)]:
+            try:
+                d = _nth_weekday(ym[0], ym[1], ev["day_of_week"], n)
+                if d >= today:
+                    candidates.append(d)
+            except ValueError:
+                pass
+
+    return min(candidates) if candidates else today
+
+
+def _tag_when(d: date, today: date) -> str:
+    delta = (d - today).days
+    if delta < 0:
+        return "pasado"
+    if delta == 0:
+        return "hoy"
+    if delta == 1:
+        return "mañana"
+    if delta <= 7:
+        return f"en {delta}d"
+    return f"en {delta}d"
+
+
+# ---------------------------------------------------------------------------
+# Public Service
+# ---------------------------------------------------------------------------
+
+class MacroDataService:
+
+    @staticmethod
+    def get_indicators() -> Dict:
+        """Retorna todos los indicadores macro (CL + US) cacheados."""
+        cached = _cached("indicators")
+        if cached is not None:
+            return cached
+        cl = _fetch_cl_indicators()
+        us = _fetch_us_indicators()
+        data = {
+            "cl": cl,
+            "us": us,
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _set_cache("indicators", data)
+        return data
+
+    @staticmethod
+    def get_calendar(days_ahead: int = 14) -> Dict:
+        """Retorna eventos macro de los próximos `days_ahead` días."""
+        cached = _cached("calendar")
+        if cached is not None:
+            return cached
+
+        today = date.today()
+        end = today + timedelta(days=days_ahead)
+        events: List[Dict] = []
+        for ev in _RECURRING_EVENTS:
+            next_d = _next_occurrence(ev, today)
+            when = _tag_when(next_d, today)
+            events.append({
+                "id": ev["id"],
+                "name": ev["name"],
+                "country": ev["country"],
+                "impact": ev["impact"],
+                "category": ev["category"],
+                "date": next_d.isoformat(),
+                "hour_cl": ev.get("hour_cl", ""),
+                "when": when,
+            })
+        events.sort(key=lambda e: e["date"])
+
+        data = {
+            "events": events,
+            "from": today.isoformat(),
+            "to": end.isoformat(),
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _set_cache("calendar", data)
+        return data
+
+    @staticmethod
+    def build_ai_context() -> str:
+        """Resumen compacto de macro para inyectar al prompt de DeepSeek."""
+        try:
+            ind = MacroDataService.get_indicators()
+            cal = MacroDataService.get_calendar()
+        except Exception as e:
+            print(f"[macro] build_ai_context error: {e}")
+            return ""
+
+        lines: List[str] = []
+
+        # Indicadores clave
+        all_ind = ind.get("cl", []) + ind.get("us", [])
+        for i in all_ind:
+            v = i.get("value")
+            if v is None:
+                continue
+            chg = i.get("change_pct")
+            chg_str = f" ({chg:+.2f}%)" if chg is not None else ""
+            if i["format"] == "currency":
+                v_str = f"${v:,.2f}"
+            elif i["format"] == "percent":
+                v_str = f"{v:.2f}%"
+            elif i["format"] == "commodity":
+                v_str = f"${v:,.2f}"
+            else:
+                v_str = f"{v:,.2f}"
+            lines.append(f"  - {i['name']} ({i['country']}): {v_str}{chg_str}")
+
+        ind_block = "\n".join(lines) if lines else "  (no disponible)"
+
+        # Próximos 5 eventos
+        upcoming = [e for e in cal.get("events", []) if e["when"] not in ("pasado",)][:5]
+        cal_lines: List[str] = []
+        for e in upcoming:
+            stars = "★" * e["impact"] + "☆" * (3 - e["impact"])
+            cal_lines.append(
+                f"  - {e['date']} {e['hour_cl']} CL — {e['name']} ({e['country']}) [{stars}]"
+            )
+        cal_block = "\n".join(cal_lines) if cal_lines else "  (sin eventos próximos)"
+
+        return (
+            "**Indicadores económicos actuales:**\n"
+            f"{ind_block}\n\n"
+            "**Próximos eventos macro relevantes (high-impact):**\n"
+            f"{cal_block}"
+        )

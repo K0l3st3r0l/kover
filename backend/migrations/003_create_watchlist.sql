@@ -13,6 +13,6 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 
 -- Índices para mejorar el rendimiento
-CREATE INDEX idx_watchlist_user_id ON watchlist(user_id);
-CREATE INDEX idx_watchlist_ticker ON watchlist(ticker);
-CREATE UNIQUE INDEX idx_watchlist_user_ticker ON watchlist(user_id, ticker);
+CREATE INDEX IF NOT EXISTS idx_watchlist_user_id ON watchlist(user_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_ticker ON watchlist(ticker);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_watchlist_user_ticker ON watchlist(user_id, ticker);

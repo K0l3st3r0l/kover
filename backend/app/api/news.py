@@ -3,13 +3,14 @@ import json
 import time
 import requests
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models.stock import Stock
 from ..models.user import User
 from ..utils.auth import get_current_user
 from ..market import MarketDataService
+from ..market.macro_data import MacroDataService
 
 router = APIRouter()
 
@@ -75,6 +76,28 @@ def get_single_ticker_news(
     return {"news": news, "ticker": ticker.upper()}
 
 
+@router.get("/macro")
+def get_macro_indicators():
+    """
+    Indicadores macro actuales para alimentar la IA y mostrar en /noticias.
+    Combina Chile (mindicador.cl) + internacionales (DXY, yields, VIX, commodities).
+    """
+    try:
+        data = MacroDataService.get_indicators()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Error cargando macro: {e}")
+
+
+@router.get("/macro-calendar")
+def get_macro_calendar(days: int = Query(default=14, ge=1, le=60)):
+    """Calendario económico curado de los próximos `days` días."""
+    try:
+        return MacroDataService.get_calendar(days_ahead=days)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Error cargando calendario: {e}")
+
+
 @router.get("/analysis")
 def get_news_analysis(
     db: Session = Depends(get_db),
@@ -128,6 +151,20 @@ def get_news_analysis(
         for item in news_for_ai
     )
 
+    # Macro context (international indicators + economic calendar).
+    # Best-effort: if the macro service fails, we still proceed with news only.
+    macro_block = ""
+    try:
+        macro_block = MacroDataService.build_ai_context()
+    except Exception as e:
+        print(f"[news.analysis] macro context unavailable: {e}")
+
+    macro_section = (
+        f"\n{macro_block}\n"
+        if macro_block
+        else "\n(Indicadores macro internacionales no disponibles en este momento.)\n"
+    )
+
     today_str = date.today().strftime("%d/%m/%Y")
     prompt = f"""Eres un analista financiero experto en opciones sobre acciones y dividendos, orientado a inversores particulares con estrategia de ingresos pasivos.
 
@@ -142,6 +179,7 @@ def get_news_analysis(
 
 **Noticias del día:**
 {news_lines}
+{macro_section}
 
 Analiza estas noticias y responde ÚNICAMENTE con JSON válido (sin texto extra, sin markdown, sin ```), con esta estructura exacta:
 
