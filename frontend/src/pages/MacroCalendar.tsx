@@ -174,7 +174,7 @@ export default function MacroCalendar() {
       )}
 
       <p className="text-[10px] text-gray-400 dark:text-gray-500 mt-4">
-        Calendario curado por reglas de recurrencia (no oficial). Resultados: mindicador.cl para Chile, Alpha Vantage para EE.UU. cuando hay key configurada.
+        Calendario curado por reglas de recurrencia (no oficial). Resultados: mindicador.cl para Chile, FRED (St. Louis Fed) para EE.UU. con respaldo en Alpha Vantage.
       </p>
     </div>
   )

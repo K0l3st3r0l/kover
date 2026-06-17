@@ -34,13 +34,32 @@ _HEADERS = {
 
 MINDICADOR_BASE = "https://mindicador.cl/api"
 
-# Alpha Vantage (opcional, free: 25 req/día) — usado solo para el "resultado
-# real" de eventos macro US en el calendario. Sin key, esos campos quedan
-# vacíos y el calendario sigue funcionando igual que antes.
+# FRED (St. Louis Fed) — fuente principal del "resultado real" de eventos US.
+# Gratis, rate limit generoso (120 req/min) y publica el mismo día que la
+# fuente oficial (BLS, BEA, Fed). Requiere FRED_API_KEY.
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+
+# Alpha Vantage — respaldo si no hay FRED_API_KEY o la serie FRED falla.
+# Free: 25 req/día. Sin ninguna de las dos keys, esos campos quedan vacíos
+# y el calendario sigue funcionando igual que antes.
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
 AV_CACHE_TTL = 24 * 3600  # 24h — estos indicadores se publican como máximo 1 vez/mes
 
-# event_id -> (función Alpha Vantage, formato de valor)
+# event_id -> (series_id FRED, formato de valor)
+# DFEDTARU = límite superior del rango objetivo Fed Funds — se actualiza el
+# mismo día de la decisión FOMC, no con rezago mensual como FEDERAL_FUNDS_RATE.
+_FRED_EVENT_SERIES = {
+    "fomc":       ("DFEDTARU", "percent"),
+    "cpi_us":     ("CPIAUCSL", "index"),
+    "nfp":        ("PAYEMS", "index"),
+    "pce_us":     ("PCEPI", "index"),
+    "ppi_us":     ("PPIACO", "index"),
+    "retail_us":  ("RSAFS", "index"),
+    "gdp_us":     ("GDPC1", "index"),
+}
+
+# event_id -> (función Alpha Vantage, formato de valor) — respaldo de lo de arriba
 _AV_EVENT_FUNCTIONS = {
     "fomc":       ("FEDERAL_FUNDS_RATE", "percent"),
     "cpi_us":     ("CPI", "index"),
@@ -280,8 +299,36 @@ def _fetch_us_indicators() -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
-# Resultados reales de eventos US — Alpha Vantage (opcional)
+# Resultados reales de eventos US — FRED (principal) + Alpha Vantage (respaldo)
 # ---------------------------------------------------------------------------
+
+def _fetch_fred_series(series_id: str) -> Optional[List[Dict]]:
+    """Últimas observaciones de una serie FRED (más reciente primero). None
+    si falla o no hay key configurada."""
+    if not FRED_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            FRED_BASE,
+            params={
+                "series_id": series_id,
+                "api_key": FRED_API_KEY,
+                "file_type": "json",
+                "sort_order": "desc",
+                "limit": 6,
+            },
+            headers=_HEADERS,
+            timeout=8,
+        )
+        resp.raise_for_status()
+        obs = resp.json().get("observations") or []
+        # FRED marca observaciones faltantes con "."
+        clean = [o for o in obs if o.get("value") not in (None, ".", "")]
+        return clean or None
+    except Exception as e:
+        print(f"[macro] fred {series_id} error: {e}")
+        return None
+
 
 def _fetch_av_series(function: str) -> Optional[List[Dict]]:
     """Serie histórica de un indicador económico Alpha Vantage. None si falla
@@ -300,39 +347,69 @@ def _fetch_av_series(function: str) -> Optional[List[Dict]]:
 
 
 def _fetch_us_event_actuals() -> Dict[str, Dict]:
-    """Último resultado publicado por evento US, vía Alpha Vantage. TTL largo
-    (24h) porque estos indicadores se publican como máximo 1 vez al mes y la
-    key gratuita tiene límite de 25 requests/día."""
+    """Último resultado publicado por evento US. Intenta FRED primero (mismo
+    día que la fuente oficial); si no hay key o la serie falla, cae a Alpha
+    Vantage. TTL largo (24h) porque estos indicadores se publican como
+    máximo 1 vez al mes."""
     cached = _cached("us_actuals", AV_CACHE_TTL)
     if cached is not None:
         return cached
 
     result: Dict[str, Dict] = {}
-    if ALPHA_VANTAGE_KEY:
-        for event_id, (func, fmt) in _AV_EVENT_FUNCTIONS.items():
-            series = _fetch_av_series(func)
-            if not series:
-                continue
-            try:
-                latest = series[0]
-                prev = series[1] if len(series) > 1 else None
-                value = float(latest["value"])
-                value_prev = float(prev["value"]) if prev else None
-                change_pct = None
-                if value_prev and value_prev != 0:
-                    change_pct = round((value - value_prev) / value_prev * 100, 2)
-                result[event_id] = {
-                    "value": value,
-                    "previous": value_prev,
-                    "change_pct": change_pct,
-                    "as_of": latest.get("date"),
-                    "format": fmt,
-                }
-            except (KeyError, ValueError, TypeError):
-                continue
+    event_ids = set(_FRED_EVENT_SERIES) | set(_AV_EVENT_FUNCTIONS)
 
-    # Respaldo: completar con el último dato bueno en disco si AV falló o no
-    # hay key (no sobreescribe lo que sí se obtuvo fresco).
+    for event_id in event_ids:
+        fred_spec = _FRED_EVENT_SERIES.get(event_id)
+        if fred_spec:
+            series_id, fmt = fred_spec
+            obs = _fetch_fred_series(series_id)
+            if obs:
+                try:
+                    latest = obs[0]
+                    prev = obs[1] if len(obs) > 1 else None
+                    value = float(latest["value"])
+                    value_prev = float(prev["value"]) if prev else None
+                    change_pct = None
+                    if value_prev and value_prev != 0:
+                        change_pct = round((value - value_prev) / value_prev * 100, 2)
+                    result[event_id] = {
+                        "value": value,
+                        "previous": value_prev,
+                        "change_pct": change_pct,
+                        "as_of": latest.get("date"),
+                        "format": fmt,
+                        "source": "fred",
+                    }
+                    continue
+                except (KeyError, ValueError, TypeError):
+                    pass
+
+        av_spec = _AV_EVENT_FUNCTIONS.get(event_id)
+        if av_spec:
+            func, fmt = av_spec
+            series = _fetch_av_series(func)
+            if series:
+                try:
+                    latest = series[0]
+                    prev = series[1] if len(series) > 1 else None
+                    value = float(latest["value"])
+                    value_prev = float(prev["value"]) if prev else None
+                    change_pct = None
+                    if value_prev and value_prev != 0:
+                        change_pct = round((value - value_prev) / value_prev * 100, 2)
+                    result[event_id] = {
+                        "value": value,
+                        "previous": value_prev,
+                        "change_pct": change_pct,
+                        "as_of": latest.get("date"),
+                        "format": fmt,
+                        "source": "alpha_vantage",
+                    }
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+    # Respaldo: completar con el último dato bueno en disco si ambas fuentes
+    # fallaron o no hay key (no sobreescribe lo que sí se obtuvo fresco).
     last_good = _load_disk("us_actuals") or {}
     for k, v in last_good.items():
         if k not in result:
@@ -625,7 +702,7 @@ class MacroDataService:
                     "actual_change_pct": a.get("change_pct"),
                     "actual_date": a.get("as_of"),
                     "actual_format": a.get("format"),
-                    "actual_source": "alpha_vantage" + (" (caché)" if a.get("stale") else ""),
+                    "actual_source": a.get("source", "alpha_vantage") + (" (caché)" if a.get("stale") else ""),
                 })
             return event
 
