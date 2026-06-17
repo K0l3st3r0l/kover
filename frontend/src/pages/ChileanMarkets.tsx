@@ -87,6 +87,7 @@ export default function ChileanMarkets() {
   const [maximized, setMaximized] = useState<'rent' | 'pat' | 'obv' | null>(null)
   const [signalChartData, setSignalChartData] = useState<any[]>([])
   const [macroData, setMacroData] = useState<any>(null)
+  const [aiCommittee, setAiCommittee] = useState<any>(null)
   const [currentAllocation, setCurrentAllocation] = useState<Record<string, number>>(() => {
     try {
       const saved = localStorage.getItem('afp-current-allocation')
@@ -203,10 +204,18 @@ export default function ChileanMarkets() {
     } catch {}
   }, [])
 
+  const fetchAiCommittee = useCallback(async () => {
+    try {
+      const res = await api.get('/api/market/ai-committee')
+      setAiCommittee(res.data)
+    } catch {}
+  }, [])
+
   useEffect(() => {
     fetchSignalData()
     fetchMacro()
-  }, [fetchSignalData, fetchMacro])
+    fetchAiCommittee()
+  }, [fetchSignalData, fetchMacro, fetchAiCommittee])
 
   const toggleFund = (fund: string) => {
     setActiveFunds(prev => {
@@ -605,6 +614,7 @@ export default function ChileanMarkets() {
     }
 
     // ── Distribución porcentual sugerida ─────────────────────────────────────
+    // Máximo 2 fondos por restricción de la AFP: no permite distribuir entre 3+.
     interface AllocationItem { fund: string; pct: number }
     interface Allocation { items: AllocationItem[]; label: string; description: string }
 
@@ -626,25 +636,25 @@ export default function ChileanMarkets() {
       }
     } else if (regime === 'bear') {
       allocation = {
-        items: [{ fund: 'E', pct: 50 }, { fund: 'D', pct: 30 }, { fund: 'C', pct: 20 }],
+        items: [{ fund: 'E', pct: 80 }, { fund: 'C', pct: 20 }],
         label: 'Defensivo',
         description: 'Señales bajistas leves. Posición defensiva con una fracción en C para no perder todo el upside si revierte.',
       }
     } else if (regime === 'neutral' && (hasBearishDiv || aS.obvPos === 'bajo')) {
       allocation = {
-        items: [{ fund: 'E', pct: 40 }, { fund: 'D', pct: 35 }, { fund: 'C', pct: 25 }],
+        items: [{ fund: 'E', pct: 75 }, { fund: 'C', pct: 25 }],
         label: 'Cauteloso',
         description: 'Régimen neutro con sesgo bajista. Posición conservadora manteniendo exposición moderada en C.',
       }
     } else if (regime === 'neutral') {
       allocation = {
-        items: [{ fund: 'C', pct: 40 }, { fund: 'D', pct: 40 }, { fund: 'E', pct: 20 }],
+        items: [{ fund: 'C', pct: 40 }, { fund: 'D', pct: 60 }],
         label: 'Equilibrado',
         description: 'Sin señal clara. Distribución centrada en C y D, sin exposición a renta variable agresiva.',
       }
     } else if (regime === 'bull' && hasBearishDiv) {
       allocation = {
-        items: [{ fund: 'C', pct: 40 }, { fund: 'B', pct: 35 }, { fund: 'D', pct: 25 }],
+        items: [{ fund: 'C', pct: 65 }, { fund: 'B', pct: 35 }],
         label: 'Alcista cauteloso',
         description: 'Tendencia alcista con divergencia bajista en OBV. Exposición moderada esperando confirmación de la señal.',
       }
@@ -656,7 +666,7 @@ export default function ChileanMarkets() {
       }
     } else if (regime === 'bull' && spread > 8) {
       allocation = {
-        items: [{ fund: 'B', pct: 50 }, { fund: 'C', pct: 30 }, { fund: 'D', pct: 20 }],
+        items: [{ fund: 'B', pct: 50 }, { fund: 'C', pct: 50 }],
         label: 'Moderadamente alcista',
         description: 'Exposición parcial en renta variable con protección moderada. B captura el ciclo sin el riesgo máximo de A.',
       }
@@ -1477,6 +1487,103 @@ export default function ChileanMarkets() {
           </div>
         )}
       </div>
+
+      {/* ── Comité de IA Multi-Modelo ── */}
+      {aiCommittee && (
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-6">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold text-gray-800 dark:text-white">
+              🤖 Comité de IA Multi-Modelo
+            </h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              Dos analistas (DeepSeek, MiniMax) analizan los datos en paralelo y un árbitro independiente (GLM) contrasta ambos veredictos.
+              {aiCommittee.generated_at && ` Generado: ${new Date(aiCommittee.generated_at).toLocaleString('es-CL')}.`}
+            </p>
+          </div>
+
+          {aiCommittee.status === 'generating' && (
+            <div className="text-sm text-gray-500 dark:text-gray-400">
+              Generando el primer análisis del comité (puede tardar unos minutos)… refresca la página más tarde.
+            </div>
+          )}
+
+          {aiCommittee.status === 'ready' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {aiCommittee.analysts.map((a: any) => (
+                  <div key={a.model} className="rounded-lg border border-gray-100 dark:border-gray-700 p-3">
+                    <p className="text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">{a.model}</p>
+                    {a.parsed ? (
+                      <>
+                        <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">{a.parsed.regimen}</p>
+                        <div className="flex gap-1.5 mb-2">
+                          {a.parsed.distribucion?.map((d: any) => (
+                            <span key={d.fondo} className="text-xs font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: `${funds[d.fondo]?.color ?? '#888'}22`, color: funds[d.fondo]?.color ?? '#888' }}>
+                              {d.pct}% {FUND_NAMES[d.fondo] ?? d.fondo}
+                            </span>
+                          ))}
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">{a.parsed.analisis}</p>
+                      </>
+                    ) : (
+                      <p className="text-xs text-gray-400 italic">No se pudo interpretar la respuesta de este modelo.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {aiCommittee.arbiter?.parsed && (
+                <div className="rounded-lg border-2 border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4">
+                  <p className="text-xs font-bold text-blue-700 dark:text-blue-300 mb-2">⚖️ Veredicto del árbitro ({aiCommittee.arbiter.model})</p>
+
+                  <div className="flex gap-1.5 mb-3">
+                    {aiCommittee.arbiter.parsed.decision_final?.distribucion?.map((d: any) => (
+                      <span key={d.fondo} className="text-sm font-bold px-2.5 py-1 rounded-full text-white" style={{ backgroundColor: funds[d.fondo]?.color ?? '#888' }}>
+                        {d.pct}% {FUND_NAMES[d.fondo] ?? d.fondo}
+                      </span>
+                    ))}
+                  </div>
+
+                  <p className="text-xs text-gray-600 dark:text-gray-300 mb-3">{aiCommittee.arbiter.parsed.decision_final?.justificacion}</p>
+
+                  <details className="text-xs text-gray-500 dark:text-gray-400">
+                    <summary className="cursor-pointer font-semibold mb-1">Ver evaluación crítica completa</summary>
+                    <p className="mb-2"><strong>Evaluación crítica:</strong> {aiCommittee.arbiter.parsed.evaluacion_critica}</p>
+                    {aiCommittee.arbiter.parsed.coincidencias?.length > 0 && (
+                      <div className="mb-2">
+                        <strong>Coincidencias:</strong>
+                        <ul className="list-disc list-inside">
+                          {aiCommittee.arbiter.parsed.coincidencias.map((c: string, i: number) => <li key={i}>{c}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {aiCommittee.arbiter.parsed.diferencias?.length > 0 && (
+                      <div className="mb-2">
+                        <strong>Diferencias:</strong>
+                        <ul className="list-disc list-inside">
+                          {aiCommittee.arbiter.parsed.diferencias.map((d: string, i: number) => <li key={i}>{d}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                    {aiCommittee.arbiter.parsed.riesgos_a_vigilar?.length > 0 && (
+                      <div>
+                        <strong>Riesgos a vigilar:</strong>
+                        <ul className="list-disc list-inside">
+                          {aiCommittee.arbiter.parsed.riesgos_a_vigilar.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </details>
+                </div>
+              )}
+
+              <p className="text-xs text-gray-400 dark:text-gray-600">
+                ⚠️ Análisis generado por modelos de IA, se actualiza 1 vez al día. No constituye asesoría financiera.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Contexto Macroeconómico Chile ── */}
       {macroData?.indicators && (

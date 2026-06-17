@@ -31,6 +31,8 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-kover}
       SECRET_KEY: ${SECRET_KEY:-changeme}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      AI_API_URL: ${AI_API_URL:-https://opencode.ai/zen/go}
+      AI_API_KEY: ${AI_API_KEY:-}
     volumes:
       - ./backend/cache:/app/cache
     depends_on:

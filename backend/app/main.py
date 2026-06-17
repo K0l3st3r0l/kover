@@ -1,3 +1,5 @@
+import threading
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
@@ -37,6 +39,11 @@ app.include_router(import_ib.router, prefix="/api/import-ib", tags=["import-ib"]
 app.include_router(chilean_markets.router, prefix="/api/market", tags=["chilean-markets"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
 app.include_router(dividends.router, prefix="/api/dividends", tags=["dividends"])
+
+@app.on_event("startup")
+def _start_ai_committee_loop():
+    if chilean_markets.AI_API_KEY:
+        threading.Thread(target=chilean_markets.ai_committee_background_loop, daemon=True).start()
 
 @app.get("/")
 async def root():
