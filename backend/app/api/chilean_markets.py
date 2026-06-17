@@ -1,6 +1,8 @@
+import html
 import json
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +41,32 @@ FUND_RISK = {
     "D": "Conservador",
     "E": "Más Conservador",
 }
+
+# Límite legal de inversión en renta variable por tipo de fondo (D.L. 3500 /
+# normativa de la Superintendencia de Pensiones). El resto del portafolio es
+# renta fija (nacional + extranjera). E no invierte en renta variable.
+FUND_EQUITY_LIMITS = {
+    "A": "40%-80%",
+    "B": "25%-60%",
+    "C": "15%-40%",
+    "D": "5%-20%",
+    "E": "0%-5%",
+}
+
+# -- Composición real de cartera por fondo (Superintendencia de Pensiones) -----
+# Endpoint público "cartera agregada": devuelve una tabla HTML con la
+# distribución efectiva renta variable/fija, nacional vs extranjera, de cada
+# fondo. Reemplaza el límite legal (FUND_EQUITY_LIMITS) por el dato real en el
+# contexto de IA cuando está disponible.
+SP_CARTERA_URL = "https://www.spensiones.cl/apps/carteras/genera_xsl.php"
+SP_CARTERA_REFERER = "https://www.spensiones.cl/apps/carteras/menuItem.php"
+
+# Promedio simple del %Fondo entre 4 AFP grandes, para no sesgar por la política
+# de inversión de una sola administradora. No se pondera por patrimonio.
+CARTERA_AFPS = ["UNO", "HABITAT", "PROVIDA", "CAPITAL"]
+CARTERA_CACHE_DIR = Path(os.getenv("CARTERA_CACHE_DIR", "/app/cache/cartera"))
+CARTERA_REQUEST_DELAY = 1.5    # seg entre requests (sitio gubernamental, conservador)
+CARTERA_MAX_MONTHS_BACK = 4    # la publicación tiene rezago de ~1-2 meses
 
 # -- Comité de IA multi-modelo (OpenCode Zen gateway, cuota OpenCode Go) ------
 AI_API_URL = os.getenv("AI_API_URL", "https://opencode.ai/zen/go")
@@ -179,6 +207,165 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
         return cached, True
 
     return [], False
+
+
+# -- Composición real de cartera por fondo ------------------------------------
+
+def _parse_cartera_html(text: str) -> Optional[dict]:
+    """
+    Parsea la tabla HTML de cartera agregada de un fondo. Devuelve los % del
+    fondo por categoría, o None si la página no trae datos (mes no publicado).
+
+    La tabla tiene filas `<td>etiqueta</td><td>MMUS$</td><td>%Fondo</td>`,
+    agrupadas en secciones INVERSIÓN NACIONAL TOTAL / INVERSIÓN EXTRANJERA TOTAL
+    (con "RENTA VARIABLE"/"RENTA FIJA" repetidas dentro de cada una) y subtotales
+    SUBTOTAL RENTA VARIABLE / SUBTOTAL RENTA FIJA al final.
+    """
+    out: dict = {}
+    section: Optional[str] = None
+    has_total = False
+
+    for row in re.findall(r"<tr>(.*?)</tr>", text, re.S):
+        tds = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S)
+        cells = [html.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in tds]
+        cells = [c for c in cells if c]
+        if len(cells) < 3:
+            continue
+
+        label = cells[0].upper()
+        pct = _parse_cl_number(cells[-1])
+
+        if "INVERSIÓN NACIONAL TOTAL" in label:
+            section = "nacional"
+            out["nacional_total"] = pct
+        elif "INVERSIÓN EXTRANJERA TOTAL" in label:
+            section = "extranjera"
+            out["extranjera_total"] = pct
+        elif label == "RENTA VARIABLE" and section and f"rv_{section}" not in out:
+            out[f"rv_{section}"] = pct
+        elif label.startswith("RENTA FIJA") and section and f"rf_{section}" not in out:
+            out[f"rf_{section}"] = pct
+        elif "SUBTOTAL RENTA VARIABLE" in label:
+            out["renta_variable_total"] = pct
+        elif "SUBTOTAL RENTA FIJA" in label:
+            out["renta_fija_total"] = pct
+        elif "TOTAL ACTIVOS" in label:
+            has_total = True
+
+    if not has_total or out.get("renta_variable_total") is None:
+        return None
+    return out
+
+
+def _fetch_cartera_raw(fund: str, afp: str, fecpro: str) -> Optional[dict]:
+    """Descarga y parsea la cartera de un fondo/AFP, con backoff exponencial."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        "Referer": SP_CARTERA_REFERER,
+    }
+    params = {"fecpro": fecpro, "listado": "2", "tipofondo": fund, "nomafp": afp}
+
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.get(SP_CARTERA_URL, params=params, headers=headers, timeout=30)
+            resp.raise_for_status()
+            try:
+                text = resp.content.decode("utf-8")
+            except UnicodeDecodeError:
+                text = resp.content.decode("latin-1")
+            return _parse_cartera_html(text)
+        except Exception as e:
+            last_err = e
+            time.sleep(CARTERA_REQUEST_DELAY * (2 ** attempt))
+    logger.warning(f"Cartera fetch falló fondo {fund} AFP {afp} ({fecpro}): {last_err}")
+    return None
+
+
+def _cartera_cache_path(fecpro: str) -> Path:
+    return CARTERA_CACHE_DIR / f"cartera_{fecpro}.json"
+
+
+def _save_cartera_cache(fecpro: str, data: dict) -> None:
+    try:
+        CARTERA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cartera_cache_path(fecpro).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Cartera cache write failed {fecpro}: {e}")
+
+
+def _load_cartera_cache(fecpro: str) -> Optional[dict]:
+    try:
+        path = _cartera_cache_path(fecpro)
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"Cartera cache read failed {fecpro}: {e}")
+    return None
+
+
+def _resolve_cartera_fecpro() -> Optional[str]:
+    """
+    Encuentra el mes (YYYYMM) más reciente con datos publicados. Por el rezago
+    de publicación, prueba desde el mes actual hacia atrás hasta
+    CARTERA_MAX_MONTHS_BACK, sondeando con fondo A / primera AFP.
+    """
+    today = datetime.today()
+    for back in range(CARTERA_MAX_MONTHS_BACK + 1):
+        month, year = today.month - back, today.year
+        while month <= 0:
+            month += 12
+            year -= 1
+        fecpro = f"{year}{month:02d}"
+        if _load_cartera_cache(fecpro):
+            return fecpro
+        probe = _fetch_cartera_raw("A", CARTERA_AFPS[0], fecpro)
+        time.sleep(CARTERA_REQUEST_DELAY)
+        if probe:
+            return fecpro
+    return None
+
+
+def _fetch_cartera_composition() -> Optional[dict]:
+    """
+    Composición real promedio por fondo (A-E), promediando CARTERA_AFPS. Cachea
+    el resultado por mes. Devuelve None si no hay datos publicados disponibles.
+    """
+    fecpro = _resolve_cartera_fecpro()
+    if not fecpro:
+        logger.warning("Cartera: no se encontró mes con datos publicados")
+        return None
+
+    cached = _load_cartera_cache(fecpro)
+    if cached:
+        return cached
+
+    metrics = [
+        "rv_nacional", "rv_extranjera", "rf_nacional", "rf_extranjera",
+        "renta_variable_total", "renta_fija_total",
+        "nacional_total", "extranjera_total",
+    ]
+    by_fund: dict = {}
+    for fund in FUND_TYPES:
+        acc = {m: [] for m in metrics}
+        for afp in CARTERA_AFPS:
+            data = _fetch_cartera_raw(fund, afp, fecpro)
+            time.sleep(CARTERA_REQUEST_DELAY)
+            if not data:
+                continue
+            for m in metrics:
+                if data.get(m) is not None:
+                    acc[m].append(data[m])
+        averaged = {m: round(sum(v) / len(v), 2) for m, v in acc.items() if v}
+        if averaged:
+            by_fund[fund] = averaged
+
+    if not by_fund:
+        return None
+
+    result = {"fecpro": fecpro, "afps": CARTERA_AFPS, "funds": by_fund}
+    _save_cartera_cache(fecpro, result)
+    return result
 
 
 def _normalize_series(records: list) -> list:
@@ -407,10 +594,15 @@ def _build_ai_market_context(days: int = 200) -> dict:
     year_end = today.year
     year_start = max(2002, year_end - (days // 365) - 2)
 
-    fund_a = _ai_fund_signal("A", year_start, year_end, days)
-    fund_e = _ai_fund_signal("E", year_start, year_end, days)
-    if not fund_a or not fund_e:
+    funds = {f: _ai_fund_signal(f, year_start, year_end, days) for f in FUND_TYPES}
+    if any(v is None for v in funds.values()):
         raise RuntimeError("No se pudo construir el contexto de mercado (datos de fondos AFP no disponibles)")
+
+    try:
+        cartera = _fetch_cartera_composition()
+    except Exception as e:
+        logger.warning(f"Cartera composition no disponible, se usa límite legal: {e}")
+        cartera = None
 
     years = [today.year - 1, today.year]
     tpm_series = _fetch_mindicador("tpm", years)
@@ -435,8 +627,7 @@ def _build_ai_market_context(days: int = 200) -> dict:
     dolar_range = (round(min(dolar_recent)), round(max(dolar_recent))) if dolar_recent else None
 
     return {
-        "fund_a": fund_a,
-        "fund_e": fund_e,
+        "funds": funds,
         "tpm_last": tpm_last,
         "tpm_trend_3m": tpm_trend,
         "ipc_avg_3m": ipc_avg_3m,
@@ -444,23 +635,49 @@ def _build_ai_market_context(days: int = 200) -> dict:
         "cobre_mom30d": cobre_mom30d,
         "dolar_last": dolar_last,
         "dolar_range_60d": dolar_range,
+        "cartera": cartera,
         "horizon_years": AI_INVESTMENT_HORIZON_YEARS,
     }
 
 
 def _ai_context_to_text(ctx: dict) -> str:
-    a, e = ctx["fund_a"], ctx["fund_e"]
+    funds = ctx["funds"]
     lines = [
         f"- TPM Banco Central: {ctx['tpm_last']}% (variación últimos 3 meses: {ctx['tpm_trend_3m']:+.2f}pp)" if ctx["tpm_last"] is not None else "- TPM: sin datos",
         f"- IPC mensual (promedio últimos 3 meses): {ctx['ipc_avg_3m']}%" if ctx["ipc_avg_3m"] is not None else "- IPC: sin datos",
         f"- Imacec (var. % interanual último dato): {ctx['imacec_last']}%" if ctx["imacec_last"] is not None else "- Imacec: sin datos",
         f"- Cobre, momentum 30d: {ctx['cobre_mom30d']:+.2f}%" if ctx["cobre_mom30d"] is not None else "- Cobre: sin datos",
         f"- USD/CLP: {ctx['dolar_last']} (rango últimos 60 días: {ctx['dolar_range_60d'][0]}-{ctx['dolar_range_60d'][1]})" if ctx["dolar_range_60d"] else "- USD/CLP: sin datos",
-        f"- Fondo A (renta variable): momentum 30d {a['mom30d']:+.2f}%, posición OBV '{a['obv_pos']}' (zona del rango del período), drawdown desde máximo del período {a['drawdown']:.2f}%",
-        f"- Fondo E (renta fija): momentum 30d {e['mom30d']:+.2f}%, posición OBV '{e['obv_pos']}'",
-        f"- Spread acumulado A vs E en el período: {a['spread_vs_first'] - e['spread_vs_first']:.2f} puntos",
-        f"- Horizonte de inversión del usuario: {ctx['horizon_years']} años",
     ]
+    cartera = ctx.get("cartera") or {}
+    cartera_funds = cartera.get("funds", {})
+    cartera_fecpro = cartera.get("fecpro")
+    for f in FUND_TYPES:
+        s = funds[f]
+        comp = cartera_funds.get(f)
+        if comp:
+            composicion = (
+                f"composición real al mes {cartera_fecpro}: renta variable "
+                f"{comp.get('renta_variable_total', 0):.1f}% del portafolio "
+                f"(nacional {comp.get('rv_nacional', 0):.1f}% + extranjera {comp.get('rv_extranjera', 0):.1f}%), "
+                f"renta fija {comp.get('renta_fija_total', 0):.1f}%, "
+                f"exposición extranjera total {comp.get('extranjera_total', 0):.1f}%"
+            )
+        else:
+            composicion = (
+                f"límite legal renta variable {FUND_EQUITY_LIMITS[f]} del portafolio, "
+                f"resto renta fija nacional/extranjera"
+            )
+        lines.append(
+            f"- Fondo {f} ({FUND_RISK[f]}, {composicion}): momentum 30d {s['mom30d']:+.2f}%, "
+            f"posición OBV '{s['obv_pos']}' (zona del rango del período), "
+            f"drawdown desde máximo del período {s['drawdown']:.2f}%"
+        )
+    lines.append(
+        f"- Spread acumulado A vs E en el período: "
+        f"{funds['A']['spread_vs_first'] - funds['E']['spread_vs_first']:.2f} puntos"
+    )
+    lines.append(f"- Horizonte de inversión del usuario: {ctx['horizon_years']} años")
     return "\n".join(lines)
 
 
@@ -533,31 +750,52 @@ def _ai_run_model(model: str, system: str, user: str) -> dict:
         return {"model": model, "parsed": None, "raw": raw}
 
 
+_URGENCY_FIELDS_SPEC = (
+    "Además evalúa la urgencia de mercado en general (no conoces la posición de ningún usuario "
+    "particular, este veredicto es único y se reutiliza para todos): "
+    "'urgencia_reducir_riesgo' (alta/media/baja) — qué tan urgente sería, según las señales actuales, "
+    "reducir exposición en fondos riesgosos (A/B) si alguien estuviera sobreexpuesto ahí; "
+    "'confirmacion_entrada_riesgo' (confirmada/parcial/no_confirmada) — si hay confirmación técnica "
+    "suficiente (momentum + OBV) para aumentar exposición en A/B si alguien estuviera subexpuesto; "
+    "'urgencia_motivo' — explicación breve (1-2 frases) de ambos juicios."
+)
+
 _ANALYST_SYSTEM_PROMPT = (
     "Eres un analista de inversiones experto en el sistema de AFP chileno. Analizas señales técnicas y "
-    "macroeconómicas para sugerir una distribución de portafolio entre los fondos A (más riesgoso/renta "
-    "variable) y E (más conservador/renta fija). Restricción dura: la AFP solo permite distribuir entre "
-    "máximo 2 fondos simultáneamente, nunca 3 o más."
+    "macroeconómicas de los 5 fondos disponibles (A, más riesgoso/renta variable, hasta E, más "
+    "conservador/renta fija) para sugerir la distribución de portafolio más adecuada dado el escenario "
+    "actual y el horizonte de inversión. Los datos incluyen el límite legal de renta variable de cada "
+    "fondo — úsalo para razonar cómo factores como el cobre, el USD/CLP o los mercados bursátiles "
+    "(nacional e internacional) impactan de forma distinta a cada fondo según su composición. "
+    "Restricción dura: la AFP solo permite distribuir entre máximo 2 "
+    "fondos simultáneamente, nunca 3 o más — elige la combinación de hasta 2 fondos (de los 5 disponibles) "
+    "que mejor se ajuste. " + _URGENCY_FIELDS_SPEC
 )
 
 _ANALYST_OUTPUT_SCHEMA = (
     'Responde SOLO con JSON: {"regimen":"...","analisis":"...",'
-    '"distribucion":[{"fondo":"X","pct":N}],"riesgos_a_vigilar":["..."]}'
+    '"distribucion":[{"fondo":"X","pct":N}],"riesgos_a_vigilar":["..."],'
+    '"urgencia_reducir_riesgo":"alta|media|baja",'
+    '"confirmacion_entrada_riesgo":"confirmada|parcial|no_confirmada",'
+    '"urgencia_motivo":"..."}'
 )
 
 _ARBITER_SYSTEM_PROMPT = (
     "Eres el árbitro final de un comité de inversión para el sistema de AFP chileno. Recibes dos análisis "
-    "independientes de otros analistas senior sobre la misma situación de mercado, cada uno con su propia "
-    "distribución sugerida entre los fondos A (renta variable) y E (renta fija). Tu trabajo es: (1) "
-    "identificar en qué coinciden y en qué difieren, (2) evaluar críticamente los argumentos de cada uno "
-    "(no asumas que uno es automáticamente correcto), y (3) emitir una decisión final fundamentada. "
-    "Restricción dura: máximo 2 fondos en la distribución final, nunca 3 o más."
+    "independientes de otros analistas senior sobre la misma situación de mercado, cada uno evaluando los "
+    "5 fondos disponibles (A a E) con su propia distribución sugerida. Tu trabajo es: (1) identificar en "
+    "qué coinciden y en qué difieren, (2) evaluar críticamente los argumentos de cada uno (no asumas que "
+    "uno es automáticamente correcto), y (3) emitir una decisión final fundamentada. Restricción dura: "
+    "máximo 2 fondos en la distribución final, nunca 3 o más. " + _URGENCY_FIELDS_SPEC
 )
 
 _ARBITER_OUTPUT_SCHEMA = (
     'Responde SOLO con JSON: {"coincidencias":["..."],"diferencias":["..."],'
     '"evaluacion_critica":"...","decision_final":{"regimen":"...",'
-    '"distribucion":[{"fondo":"X","pct":N}],"justificacion":"..."},'
+    '"distribucion":[{"fondo":"X","pct":N}],"justificacion":"...",'
+    '"urgencia_reducir_riesgo":"alta|media|baja",'
+    '"confirmacion_entrada_riesgo":"confirmada|parcial|no_confirmada",'
+    '"urgencia_motivo":"..."},'
     '"riesgos_a_vigilar":["..."]}'
 )
 

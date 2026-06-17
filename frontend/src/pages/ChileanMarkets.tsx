@@ -465,236 +465,25 @@ export default function ChileanMarkets() {
     return { tpmLast, tpmTrend, cobreLast, cobreMom, ipcAvg, score }
   }, [macroData])
 
-  const recommendation = useMemo(() => {
-    if (!fundSignals.length || !chartData.length) return null
-    const aS = fundSignals.find(s => s.fund === 'A')
-    const eS = fundSignals.find(s => s.fund === 'E')
-    const bS = fundSignals.find(s => s.fund === 'B')
-    if (!aS || !eS) return null
+  const aiDecision = aiCommittee?.status === 'ready' ? aiCommittee.arbiter?.parsed?.decision_final : null
 
-    const lastRow = chartData[chartData.length - 1]
-    const spread  = ((lastRow['A'] as number) ?? 0) - ((lastRow['E'] as number) ?? 0)
-
-    // ── Régimen de mercado ───────────────────────────────────────────────────
-    type Regime = 'bull' | 'neutral' | 'bear'
-    let regime: Regime = 'neutral'
-    if (aS.signal === 'bajista' || (aS.drawdown < -5 && aS.mom30d < -2))
-      regime = 'bear'
-    else if (aS.signal === 'alcista' && eS.signal !== 'alcista')
-      regime = 'bull'
-
-    // Macro adjustment: strong macro signal can tip neutral → bull or bear
-    if (macroScore) {
-      if (regime === 'neutral' && macroScore.score >= 68) regime = 'bull'
-      if (regime === 'neutral' && macroScore.score <= 32) regime = 'bear'
-      if (regime === 'bull'    && macroScore.score <= 28) regime = 'neutral'
-    }
-
-    const hasBearishDiv = aS.lastDivType === 'regular_bearish' || aS.lastDivType === 'hidden_bearish'
-    const hasBullishDiv = aS.lastDivType === 'regular_bullish'  || aS.lastDivType === 'hidden_bullish'
-
-    // ── Señales de rotación (triggers para cambio de fondo) ──────────────────
-    // Entrada en A: cuando se dan estas condiciones simultáneamente
-    const entryTriggers: string[] = []
-    if (aS.drawdown < -5)   entryTriggers.push(`corrección >5% activa (drawdown ${aS.drawdown.toFixed(1)}%)`)
-    if (hasBullishDiv)       entryTriggers.push('divergencia alcista OBV confirmada')
-    if (aS.mom30d < 0 && aS.mom30d > -2) entryTriggers.push('momentum negativo leve (posible giro próximo)')
-    if (eS.signal === 'alcista' && aS.signal !== 'alcista') entryTriggers.push('E superando a A (buen punto de rotación a A tras corrección)')
-
-    // Salida de A: señales para volver a fondos conservadores
-    const exitTriggers: string[] = []
-    if (hasBearishDiv)      exitTriggers.push('divergencia bajista OBV en A')
-    if (aS.drawdown < -8)  exitTriggers.push(`corrección severa en A (${aS.drawdown.toFixed(1)}%)`)
-    if (eS.mom30d > 2 && aS.mom30d < 0) exitTriggers.push('E acelerando mientras A pierde momentum')
-
-    // ── Insights ─────────────────────────────────────────────────────────────
-    const insights: { icon: string; text: string; type: 'ok' | 'warn' | 'danger' | 'info' }[] = []
-
-    // 1. Régimen
-    if (regime === 'bull')
-      insights.push({ icon: '📈', type: 'info',
-        text: `Régimen ALCISTA en renta variable. Fondo A con señales positivas${hasBearishDiv ? ', pero con divergencia bajista en OBV — posible corrección próxima antes de nueva alza' : ' y sin divergencias bajistas activas'}.` })
-    else if (regime === 'bear')
-      insights.push({ icon: '📉', type: 'danger',
-        text: 'Régimen BAJISTA en renta variable. Condiciones favorables para proteger capital en fondos conservadores (D / E).' })
-    else
-      insights.push({ icon: '📊', type: 'info',
-        text: 'Régimen NEUTRO: señales mixtas entre renta variable y fija. Sin dirección clara.' })
-
-    // 2. OBV de A
-    const obvLabel = { alto: 'en zona alta — flujos confirman tendencia', medio: 'neutro — sin confirmación de flujos', bajo: 'en zona baja — flujos no confirman precio' }
-    insights.push({
-      icon: aS.obvPos === 'alto' ? '🟢' : aS.obvPos === 'bajo' ? '🔴' : '🟡',
-      type: aS.obvPos === 'alto' ? 'ok' : aS.obvPos === 'bajo' ? 'warn' : 'info',
-      text: `OBV Fondo A ${obvLabel[aS.obvPos]}. Momentum 30d: ${aS.mom30d >= 0 ? '+' : ''}${aS.mom30d.toFixed(2)} pts.`,
-    })
-
-    // 3. Última divergencia en A
-    if (aS.lastDivType) {
-      const divText: Record<DivType, string> = {
-        regular_bearish: 'Divergencia bajista regular en A: precio en nuevo máximo pero OBV no confirma → riesgo de corrección. Considerar rotación parcial hacia C / D.',
-        hidden_bearish:  'Divergencia bajista oculta en A: continuación bajista probable. Mantener o aumentar posición en fondos conservadores.',
-        regular_bullish: 'Divergencia alcista regular en A: OBV supera al precio → señal técnica de entrada en A.',
-        hidden_bullish:  'Divergencia alcista oculta en A: continuación alcista probable → señal de mantener exposición en A / B.',
-      }
-      insights.push({
-        icon: hasBullishDiv ? '📈' : '📉',
-        type: hasBullishDiv ? 'ok' : 'warn',
-        text: divText[aS.lastDivType],
-      })
-    }
-
-    // 4. Relación E vs A (señal de rotación)
-    if (eS.signal === 'bajista' && aS.signal === 'alcista')
-      insights.push({ icon: '🔀', type: 'warn',
-        text: `Renta fija (E) cediendo mientras renta variable (A) avanza: fase "risk-on" tardía. Sin señal de salida de A aún, pero el spread A−E de ${spread.toFixed(1)} pts en el período es elevado.` })
-    else if (eS.signal === 'alcista' && regime !== 'bull')
-      insights.push({ icon: '🔔', type: 'info',
-        text: 'E acelerando respecto a A: la renta fija lidera. Patrón típico de inicio de corrección en renta variable — señal de cautela.' })
-
-    // 4b. Macro context
-    if (macroScore) {
-      const parts: string[] = []
-      if (macroScore.tpmTrend < -0.25) parts.push(`TPM bajando (${macroScore.tpmLast?.toFixed(2)}%) — política expansiva favorable para renta variable`)
-      else if (macroScore.tpmTrend > 0.25) parts.push(`TPM subiendo (${macroScore.tpmLast?.toFixed(2)}%) — política restrictiva, presiona a A/B`)
-      else parts.push(`TPM estable en ${macroScore.tpmLast?.toFixed(2)}%`)
-      if (macroScore.cobreMom > 3) parts.push(`cobre +${macroScore.cobreMom.toFixed(1)}% en 30d — señal positiva para economía chilena`)
-      else if (macroScore.cobreMom < -3) parts.push(`cobre ${macroScore.cobreMom.toFixed(1)}% en 30d — presión sobre economía chilena`)
-      if (macroScore.ipcAvg > 0.8) parts.push(`IPC promedio ${macroScore.ipcAvg.toFixed(2)}%/mes — inflación presiona tasas al alza`)
-      insights.push({
-        icon: macroScore.score >= 60 ? '🟢' : macroScore.score <= 40 ? '🔴' : '🟡',
-        type: macroScore.score >= 60 ? 'ok' : macroScore.score <= 40 ? 'warn' : 'info',
-        text: `Macro Chile: ${parts.join(' · ')}.`,
-      })
-    }
-
-    // 5. Triggers de entrada (si hay alguno activo)
-    if (entryTriggers.length)
-      insights.push({ icon: '🔔', type: 'ok',
-        text: `Señales de ENTRADA en A activas: ${entryTriggers.join(' · ')}.` })
-
-    // 6. Triggers de salida (si hay alguno activo)
-    if (exitTriggers.length)
-      insights.push({ icon: '⚠️', type: 'warn',
-        text: `Señales de ROTACIÓN A CONSERVADOR: ${exitTriggers.join(' · ')}.` })
-
-    // ── Qué observar para decidir el cambio ──────────────────────────────────
-    const watchFor: string[] = []
-    if (regime === 'bull' && !hasBullishDiv && spread > 15)
-      watchFor.push('corrección de A > 5% con OBV sin nuevos mínimos (divergencia alcista)')
-    if (regime === 'bull' && !hasBullishDiv)
-      watchFor.push('divergencia alcista regular en OBV de A tras próximo swing bajo')
-    if (regime !== 'bear')
-      watchFor.push('E pasando a señal alcista mientras A pierde momentum (rotación defensiva)')
-    if (hasBearishDiv)
-      watchFor.push('confirmación bajista: A pierde soporte + OBV en descenso sostenido')
-
-    // ── Guidance ─────────────────────────────────────────────────────────────
-    let guidanceText = ''
-    let guidanceFund = ''
-
-    if (regime === 'bear') {
-      guidanceText = 'Señales bajistas activas en renta variable. Proteger capital hasta recuperación de señales en A.'
-      guidanceFund = 'D / E'
-    } else if (regime === 'bull' && !hasBearishDiv && aS.obvPos === 'alto' && spread <= 8) {
-      guidanceText = 'Régimen alcista confirmado por OBV, spread controlado. Momento favorable para exposición en renta variable.'
-      guidanceFund = 'A / B'
-    } else if (regime === 'bull' && hasBearishDiv) {
-      guidanceText = 'Tendencia alcista con divergencia bajista en OBV. Esperar corrección y confirmación antes de entrar en A.'
-      guidanceFund = 'B / C'
-    } else if (regime === 'bull' && spread > 15) {
-      guidanceText = 'Tendencia intacta pero spread A−E en máximos del período. Con 15 años de horizonte, esperar corrección mejora el punto de entrada sin perder el ciclo.'
-      guidanceFund = 'E / D'
-    } else if (regime === 'bull' && bS?.signal === 'alcista') {
-      guidanceText = 'Régimen alcista con spread moderado. B captura la tendencia con menor volatilidad que A.'
-      guidanceFund = 'B'
-    } else {
-      guidanceText = 'Señales mixtas. C o D como posición intermedia hasta que el régimen se defina.'
-      guidanceFund = 'C / D'
-    }
-
-    // ── Distribución porcentual sugerida ─────────────────────────────────────
-    // Máximo 2 fondos por restricción de la AFP: no permite distribuir entre 3+.
-    interface AllocationItem { fund: string; pct: number }
-    interface Allocation { items: AllocationItem[]; label: string; description: string }
-
-    let allocation: Allocation
-
-    const aScore = aS.score
-
-    if (regime === 'bear' && aScore < 25) {
-      allocation = {
-        items: [{ fund: 'E', pct: 100 }],
-        label: 'Protección máxima',
-        description: 'Señales bajistas severas. Capital completo en renta fija de menor riesgo hasta recuperación de señales.',
-      }
-    } else if (regime === 'bear' && aScore < 40) {
-      allocation = {
-        items: [{ fund: 'E', pct: 70 }, { fund: 'D', pct: 30 }],
-        label: 'Protección alta',
-        description: 'Señales bajistas activas. Mayoría en E, algo en D para diversificar dentro de renta fija.',
-      }
-    } else if (regime === 'bear') {
-      allocation = {
-        items: [{ fund: 'E', pct: 80 }, { fund: 'C', pct: 20 }],
-        label: 'Defensivo',
-        description: 'Señales bajistas leves. Posición defensiva con una fracción en C para no perder todo el upside si revierte.',
-      }
-    } else if (regime === 'neutral' && (hasBearishDiv || aS.obvPos === 'bajo')) {
-      allocation = {
-        items: [{ fund: 'E', pct: 75 }, { fund: 'C', pct: 25 }],
-        label: 'Cauteloso',
-        description: 'Régimen neutro con sesgo bajista. Posición conservadora manteniendo exposición moderada en C.',
-      }
-    } else if (regime === 'neutral') {
-      allocation = {
-        items: [{ fund: 'C', pct: 40 }, { fund: 'D', pct: 60 }],
-        label: 'Equilibrado',
-        description: 'Sin señal clara. Distribución centrada en C y D, sin exposición a renta variable agresiva.',
-      }
-    } else if (regime === 'bull' && hasBearishDiv) {
-      allocation = {
-        items: [{ fund: 'C', pct: 65 }, { fund: 'B', pct: 35 }],
-        label: 'Alcista cauteloso',
-        description: 'Tendencia alcista con divergencia bajista en OBV. Exposición moderada esperando confirmación de la señal.',
-      }
-    } else if (regime === 'bull' && spread > 15) {
-      allocation = {
-        items: [{ fund: 'E', pct: 60 }, { fund: 'D', pct: 40 }],
-        label: 'Espera estratégica',
-        description: 'Tendencia alcista pero spread A−E en máximos del período. Posición conservadora esperando corrección para mejorar punto de entrada en A.',
-      }
-    } else if (regime === 'bull' && spread > 8) {
-      allocation = {
-        items: [{ fund: 'B', pct: 50 }, { fund: 'C', pct: 50 }],
-        label: 'Moderadamente alcista',
-        description: 'Exposición parcial en renta variable con protección moderada. B captura el ciclo sin el riesgo máximo de A.',
-      }
-    } else if (regime === 'bull' && aS.obvPos === 'alto' && hasBullishDiv) {
-      allocation = {
-        items: [{ fund: 'A', pct: 70 }, { fund: 'B', pct: 30 }],
-        label: 'Alcista fuerte',
-        description: 'Todas las señales alineadas: OBV en zona alta y divergencia alcista confirmada. Alta exposición en renta variable.',
-      }
-    } else {
-      allocation = {
-        items: [{ fund: 'A', pct: 60 }, { fund: 'B', pct: 40 }],
-        label: 'Alcista',
-        description: 'Condiciones favorables para renta variable. A como motor, B como amortiguador ante volatilidad.',
-      }
-    }
-
-    return { insights, guidanceText, guidanceFund, spread, regime, watchFor, allocation }
-  }, [fundSignals, chartData, macroScore])
+  const aiAllocation = useMemo(() => {
+    const dist = aiDecision?.distribucion
+    if (!Array.isArray(dist) || !dist.length) return null
+    const items = dist
+      .map((d: any) => ({ fund: d.fondo, pct: d.pct }))
+      .filter((d: any) => d.fund && d.pct > 0)
+    return items.length ? items : null
+  }, [aiDecision])
 
   const rotationPlan = useMemo(() => {
-    if (!recommendation) return null
+    if (!aiAllocation) return null
     const ALL_FUNDS = ['A', 'B', 'C', 'D', 'E']
     const current: Record<string, number> = {}
     ALL_FUNDS.forEach(f => { current[f] = currentAllocation[f] ?? 0 })
     const suggested: Record<string, number> = {}
     ALL_FUNDS.forEach(f => { suggested[f] = 0 })
-    recommendation.allocation.items.forEach(item => { suggested[item.fund] = item.pct })
+    aiAllocation.forEach(item => { suggested[item.fund] = item.pct })
 
     const diffs = ALL_FUNDS.map(f => ({ fund: f, diff: suggested[f] - current[f] })).filter(d => Math.abs(d.diff) >= 1)
 
@@ -714,37 +503,38 @@ export default function ChileanMarkets() {
 
     if (!steps.length) return { aligned: true, steps, urgency: 'gradual' as const, timingReason: '' }
 
-    // ── Urgency ──────────────────────────────────────────────────────────────
+    // ── Urgency (juicio del comité de IA, combinado con la dirección del movimiento) ──
     type Urgency = 'inmediato' | 'gradual' | 'esperar'
-    const CONSERVATIVE = new Set(['C', 'D', 'E'])
-    const allConservative = steps.every(s => CONSERVATIVE.has(s.from) && CONSERVATIVE.has(s.to))
-    const movingIntoRiskOn  = steps.some(s => s.to === 'A' || s.to === 'B')
-    const movingOutOfRiskOn = steps.some(s => s.from === 'A' || s.from === 'B')
-    const aS = fundSignals.find(s => s.fund === 'A')
-    const hasBullishConfirm = aS?.lastDivType === 'regular_bullish' || aS?.lastDivType === 'hidden_bullish'
+    const RISKY = new Set(['A', 'B'])
+    const allConservative = steps.every(s => !RISKY.has(s.from) && !RISKY.has(s.to))
+    const movingIntoRiskOn  = steps.some(s => RISKY.has(s.to))
+    const movingOutOfRiskOn = steps.some(s => RISKY.has(s.from))
+    const urgenciaReducirRiesgo = aiDecision?.urgencia_reducir_riesgo
+    const confirmacionEntrada = aiDecision?.confirmacion_entrada_riesgo
+    const motivo = aiDecision?.urgencia_motivo as string | undefined
 
     let urgency: Urgency = 'gradual'
     let timingReason = ''
 
-    if (recommendation.regime === 'bear' && movingOutOfRiskOn) {
+    if (movingOutOfRiskOn && urgenciaReducirRiesgo === 'alta') {
       urgency = 'inmediato'
-      timingReason = 'Señales bajistas activas en renta variable. Reducir exposición cuanto antes — cada sesión en A/B aumenta el riesgo de pérdida acumulada.'
-    } else if (movingIntoRiskOn && !hasBullishConfirm) {
+      timingReason = motivo || 'El comité de IA califica como alta la urgencia de reducir exposición en fondos riesgosos (A/B).'
+    } else if (movingIntoRiskOn && confirmacionEntrada !== 'confirmada') {
       urgency = 'esperar'
-      timingReason = 'Antes de entrar en A/B esperar: corrección >5% en A + divergencia alcista confirmada en OBV. Sin esas señales el punto de entrada no está validado.'
-    } else if (movingIntoRiskOn && hasBullishConfirm) {
+      timingReason = motivo || 'El comité de IA aún no confirma técnicamente el punto de entrada en fondos riesgosos (A/B).'
+    } else if (movingIntoRiskOn && confirmacionEntrada === 'confirmada') {
       urgency = 'gradual'
-      timingReason = 'Señal alcista confirmada. Puedes entrar ahora o escalonar el traspaso en 2 semanas para promediar el precio de entrada.'
+      timingReason = motivo || 'El comité de IA confirma la señal de entrada. Puedes entrar ahora o escalonar el traspaso para promediar el precio.'
     } else if (allConservative) {
       urgency = 'gradual'
-      timingReason = 'Movimiento entre fondos conservadores (D/E/C). La diferencia de rendimiento en días o semanas es mínima con 15 años de horizonte — puedes ejecutarlo cuando quieras.'
+      timingReason = motivo || 'Movimiento entre fondos conservadores. La diferencia de rendimiento en días o semanas es mínima con 15 años de horizonte — puedes ejecutarlo cuando quieras.'
     } else {
       urgency = 'gradual'
-      timingReason = 'Señal clara pero sin urgencia inmediata. Ejecutar en las próximas 1–2 semanas.'
+      timingReason = motivo || 'Señal clara pero sin urgencia inmediata. Ejecutar en las próximas 1–2 semanas.'
     }
 
     return { aligned: false, steps, urgency, timingReason }
-  }, [currentAllocation, recommendation, fundSignals])
+  }, [currentAllocation, aiAllocation, aiDecision])
 
   return (
     <div className="page space-y-8">
@@ -1104,7 +894,7 @@ export default function ChileanMarkets() {
             </div>
 
             {/* ── Señal de mercado ─────────────────────────────── */}
-            {recommendation && (
+            {fundSignals.length > 0 && (
               <div className="mt-6 border-t border-gray-100 dark:border-gray-700 pt-5">
                 <div className="flex items-center gap-2 mb-3">
                   <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
@@ -1183,29 +973,9 @@ export default function ChileanMarkets() {
                   </table>
                 </div>
 
-                {/* Insights */}
-                <div className="space-y-2 mb-4">
-                  {recommendation.insights.map((ins, i) => {
-                    const bg: Record<string, string> = {
-                      ok:     'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800',
-                      warn:   'bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800',
-                      danger: 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800',
-                      info:   'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
-                    }
-                    const tx: Record<string, string> = {
-                      ok:     'text-green-700 dark:text-green-300',
-                      warn:   'text-yellow-700 dark:text-yellow-300',
-                      danger: 'text-red-700 dark:text-red-300',
-                      info:   'text-blue-700 dark:text-blue-300',
-                    }
-                    return (
-                      <div key={i} className={`flex gap-2 rounded-lg border px-3 py-2 text-xs ${bg[ins.type]}`}>
-                        <span className="flex-none">{ins.icon}</span>
-                        <span className={tx[ins.type]}>{ins.text}</span>
-                      </div>
-                    )
-                  })}
-                </div>
+                <p className="text-xs text-gray-400 dark:text-gray-600">
+                  ⚠️ Señales basadas en historial completo desde {signalChartData[0]?.date ?? '…'}. No constituye asesoría financiera.
+                </p>
 
                 {/* Tu posición actual */}
                 {fundKeys.length > 0 && (
@@ -1284,186 +1054,161 @@ export default function ChileanMarkets() {
                   </div>
                 )}
 
-                {/* Guidance card */}
-                <div className="rounded-xl bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 px-4 py-4">
-                  {/* Header row: regime badge + strategy label */}
-                  <div className="flex items-center justify-between mb-3">
-                    <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${
-                      recommendation.regime === 'bull'
-                        ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300'
-                        : recommendation.regime === 'bear'
-                        ? 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'
-                        : 'bg-yellow-100 dark:bg-yellow-900/40 text-yellow-700 dark:text-yellow-300'
-                    }`}>
-                      {recommendation.regime === 'bull' ? '📈 Régimen Alcista' : recommendation.regime === 'bear' ? '📉 Régimen Bajista' : '📊 Régimen Neutro'}
-                    </span>
-                    <span className="text-xs font-semibold text-gray-600 dark:text-gray-300">
-                      {recommendation.allocation.label}
-                    </span>
-                  </div>
-
-                  {/* Tactical guidance text */}
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">{recommendation.guidanceText}</p>
-
-                  {/* Allocation bar */}
-                  <div>
-                    <p className="text-xs font-semibold text-gray-700 dark:text-gray-200 mb-2">
-                      📊 Distribución sugerida
-                    </p>
-                    {/* Stacked bar */}
-                    <div className="flex rounded-lg overflow-hidden h-10 mb-3 shadow-inner">
-                      {recommendation.allocation.items.map(item => (
-                        <div
-                          key={item.fund}
-                          style={{ width: `${item.pct}%`, backgroundColor: funds[item.fund]?.color ?? '#888' }}
-                          className="flex items-center justify-center transition-all duration-500"
-                        >
-                          {item.pct >= 18 && (
-                            <span className="text-white text-xs font-bold drop-shadow">{item.pct}%</span>
-                          )}
-                        </div>
-                      ))}
+                {/* Distribución sugerida por el comité de IA */}
+                {aiCommittee?.status === 'ready' && aiAllocation ? (
+                  <div className="rounded-xl bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 px-4 py-4">
+                    {/* Header row: regimen badge */}
+                    <div className="flex items-center gap-2 mb-3">
+                      <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300">
+                        🤖 {aiDecision?.regimen || 'Veredicto del comité de IA'}
+                      </span>
                     </div>
-                    {/* Legend */}
-                    <div className="flex flex-wrap gap-x-5 gap-y-1.5 mb-2">
-                      {recommendation.allocation.items.map(item => (
-                        <div key={item.fund} className="flex items-center gap-1.5">
-                          <span
-                            className="w-3 h-3 rounded-sm flex-none"
-                            style={{ backgroundColor: funds[item.fund]?.color ?? '#888' }}
-                          />
-                          <span className="text-xs font-bold" style={{ color: funds[item.fund]?.color ?? '#888' }}>
-                            {item.pct}% {FUND_NAMES[item.fund]}
-                          </span>
-                          <span className="text-xs text-gray-400 dark:text-gray-500">
-                            ({funds[item.fund]?.risk_label})
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 italic">
-                      {recommendation.allocation.description}
-                    </p>
-                  </div>
 
-                  {/* Comparación y plan de rotación */}
-                  {rotationPlan && (
-                    <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
-                      <p className="text-xs font-semibold text-gray-700 dark:text-gray-200 mb-3">
-                        🔄 Comparación con tu posición actual
+                    {/* Justificación del comité */}
+                    {aiDecision?.justificacion && (
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">{aiDecision.justificacion}</p>
+                    )}
+
+                    {/* Allocation bar */}
+                    <div>
+                      <p className="text-xs font-semibold text-gray-700 dark:text-gray-200 mb-2">
+                        📊 Distribución sugerida
                       </p>
-                      <div className="space-y-2 mb-3">
-                        <div>
-                          <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Tu posición:</p>
-                          <div className="flex rounded-md overflow-hidden h-7 bg-gray-200 dark:bg-gray-700">
-                            {['A','B','C','D','E'].filter(f => (currentAllocation[f] ?? 0) > 0).map(f => (
-                              <div
-                                key={f}
-                                style={{ width: `${currentAllocation[f]}%`, backgroundColor: funds[f]?.color ?? '#888' }}
-                                className="flex items-center justify-center"
-                              >
-                                {(currentAllocation[f] ?? 0) >= 15 && (
-                                  <span className="text-white text-xs font-bold drop-shadow">{currentAllocation[f]}%</span>
-                                )}
-                              </div>
-                            ))}
+                      {/* Stacked bar */}
+                      <div className="flex rounded-lg overflow-hidden h-10 mb-3 shadow-inner">
+                        {aiAllocation.map(item => (
+                          <div
+                            key={item.fund}
+                            style={{ width: `${item.pct}%`, backgroundColor: funds[item.fund]?.color ?? '#888' }}
+                            className="flex items-center justify-center transition-all duration-500"
+                          >
+                            {item.pct >= 18 && (
+                              <span className="text-white text-xs font-bold drop-shadow">{item.pct}%</span>
+                            )}
                           </div>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Distribución sugerida:</p>
-                          <div className="flex rounded-md overflow-hidden h-7">
-                            {recommendation.allocation.items.map(item => (
-                              <div
-                                key={item.fund}
-                                style={{ width: `${item.pct}%`, backgroundColor: funds[item.fund]?.color ?? '#888' }}
-                                className="flex items-center justify-center"
-                              >
-                                {item.pct >= 15 && (
-                                  <span className="text-white text-xs font-bold drop-shadow">{item.pct}%</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
+                        ))}
                       </div>
-                      {rotationPlan.aligned ? (
-                        <div className="flex items-center gap-2 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 px-3 py-2">
-                          <span className="text-base">✅</span>
-                          <span className="text-xs text-green-700 dark:text-green-300 font-medium">
-                            Tu posición está alineada con la distribución sugerida. No se requieren cambios.
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2.5">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
-                              📋 Movimientos sugeridos
-                            </p>
-                            {rotationPlan.urgency === 'inmediato' && (
-                              <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300">
-                                🔴 Actuar ahora
-                              </span>
-                            )}
-                            {rotationPlan.urgency === 'gradual' && (
-                              <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300">
-                                🟠 Sin urgencia
-                              </span>
-                            )}
-                            {rotationPlan.urgency === 'esperar' && (
-                              <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
-                                ⏳ Esperar señal
-                              </span>
-                            )}
+                      {/* Legend */}
+                      <div className="flex flex-wrap gap-x-5 gap-y-1.5 mb-2">
+                        {aiAllocation.map(item => (
+                          <div key={item.fund} className="flex items-center gap-1.5">
+                            <span
+                              className="w-3 h-3 rounded-sm flex-none"
+                              style={{ backgroundColor: funds[item.fund]?.color ?? '#888' }}
+                            />
+                            <span className="text-xs font-bold" style={{ color: funds[item.fund]?.color ?? '#888' }}>
+                              {item.pct}% {FUND_NAMES[item.fund]}
+                            </span>
+                            <span className="text-xs text-gray-400 dark:text-gray-500">
+                              ({funds[item.fund]?.risk_label})
+                            </span>
                           </div>
-                          <div className="space-y-1.5 mb-2">
-                            {rotationPlan.steps.map((step, i) => (
-                              <div key={i} className="flex items-center gap-2 text-xs">
-                                <span className="inline-flex items-center gap-1">
-                                  <span className="w-2.5 h-2.5 rounded-sm flex-none" style={{ backgroundColor: funds[step.from]?.color ?? '#888' }} />
-                                  <span className="font-bold" style={{ color: funds[step.from]?.color }}>{FUND_NAMES[step.from]}</span>
-                                </span>
-                                <span className="text-gray-400">→</span>
-                                <span className="inline-flex items-center gap-1">
-                                  <span className="w-2.5 h-2.5 rounded-sm flex-none" style={{ backgroundColor: funds[step.to]?.color ?? '#888' }} />
-                                  <span className="font-bold" style={{ color: funds[step.to]?.color }}>{FUND_NAMES[step.to]}</span>
-                                </span>
-                                <span className="ml-auto font-mono font-semibold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 rounded">
-                                  mover {step.pct}%
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                          {rotationPlan.timingReason && (
-                            <p className="text-xs text-amber-600 dark:text-amber-400 border-t border-amber-200 dark:border-amber-700 pt-2 mt-1">
-                              {rotationPlan.timingReason}
-                            </p>
-                          )}
-                        </div>
-                      )}
+                        ))}
+                      </div>
                     </div>
-                  )}
-                </div>
 
-                {/* Qué observar para el próximo movimiento */}
-                {recommendation.watchFor.length > 0 && (
-                  <div className="mt-3 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 px-3 py-2">
-                    <p className="text-xs font-semibold text-blue-700 dark:text-blue-300 mb-1">
-                      🔭 Qué observar para el próximo cambio de fondo
-                    </p>
-                    <ul className="space-y-0.5">
-                      {recommendation.watchFor.map((w, i) => (
-                        <li key={i} className="text-xs text-blue-600 dark:text-blue-400 flex gap-1.5">
-                          <span className="opacity-60">·</span>
-                          <span>{w}</span>
-                        </li>
-                      ))}
-                    </ul>
+                    {/* Comparación y plan de rotación */}
+                    {rotationPlan && (
+                      <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-600">
+                        <p className="text-xs font-semibold text-gray-700 dark:text-gray-200 mb-3">
+                          🔄 Comparación con tu posición actual
+                        </p>
+                        <div className="space-y-2 mb-3">
+                          <div>
+                            <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Tu posición:</p>
+                            <div className="flex rounded-md overflow-hidden h-7 bg-gray-200 dark:bg-gray-700">
+                              {['A','B','C','D','E'].filter(f => (currentAllocation[f] ?? 0) > 0).map(f => (
+                                <div
+                                  key={f}
+                                  style={{ width: `${currentAllocation[f]}%`, backgroundColor: funds[f]?.color ?? '#888' }}
+                                  className="flex items-center justify-center"
+                                >
+                                  {(currentAllocation[f] ?? 0) >= 15 && (
+                                    <span className="text-white text-xs font-bold drop-shadow">{currentAllocation[f]}%</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-xs text-gray-400 dark:text-gray-500 mb-1">Distribución sugerida:</p>
+                            <div className="flex rounded-md overflow-hidden h-7">
+                              {aiAllocation.map(item => (
+                                <div
+                                  key={item.fund}
+                                  style={{ width: `${item.pct}%`, backgroundColor: funds[item.fund]?.color ?? '#888' }}
+                                  className="flex items-center justify-center"
+                                >
+                                  {item.pct >= 15 && (
+                                    <span className="text-white text-xs font-bold drop-shadow">{item.pct}%</span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                        {rotationPlan.aligned ? (
+                          <div className="flex items-center gap-2 rounded-lg bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 px-3 py-2">
+                            <span className="text-base">✅</span>
+                            <span className="text-xs text-green-700 dark:text-green-300 font-medium">
+                              Tu posición está alineada con la distribución sugerida. No se requieren cambios.
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 px-3 py-2.5">
+                            <div className="flex items-center justify-between mb-2">
+                              <p className="text-xs font-semibold text-amber-700 dark:text-amber-300">
+                                📋 Movimientos sugeridos
+                              </p>
+                              {rotationPlan.urgency === 'inmediato' && (
+                                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300">
+                                  🔴 Actuar ahora
+                                </span>
+                              )}
+                              {rotationPlan.urgency === 'gradual' && (
+                                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 dark:bg-orange-900/40 text-orange-700 dark:text-orange-300">
+                                  🟠 Sin urgencia
+                                </span>
+                              )}
+                              {rotationPlan.urgency === 'esperar' && (
+                                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">
+                                  ⏳ Esperar señal
+                                </span>
+                              )}
+                            </div>
+                            <div className="space-y-1.5 mb-2">
+                              {rotationPlan.steps.map((step, i) => (
+                                <div key={i} className="flex items-center gap-2 text-xs">
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-2.5 h-2.5 rounded-sm flex-none" style={{ backgroundColor: funds[step.from]?.color ?? '#888' }} />
+                                    <span className="font-bold" style={{ color: funds[step.from]?.color }}>{FUND_NAMES[step.from]}</span>
+                                  </span>
+                                  <span className="text-gray-400">→</span>
+                                  <span className="inline-flex items-center gap-1">
+                                    <span className="w-2.5 h-2.5 rounded-sm flex-none" style={{ backgroundColor: funds[step.to]?.color ?? '#888' }} />
+                                    <span className="font-bold" style={{ color: funds[step.to]?.color }}>{FUND_NAMES[step.to]}</span>
+                                  </span>
+                                  <span className="ml-auto font-mono font-semibold text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/40 px-2 py-0.5 rounded">
+                                    mover {step.pct}%
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            {rotationPlan.timingReason && (
+                              <p className="text-xs text-amber-600 dark:text-amber-400 border-t border-amber-200 dark:border-amber-700 pt-2 mt-1">
+                                {rotationPlan.timingReason}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 px-4 py-4 text-xs text-gray-400 dark:text-gray-500 italic">
+                    {aiCommittee?.status === 'generating' ? 'Comité de IA generando veredicto...' : 'Distribución sugerida del comité de IA no disponible aún.'}
                   </div>
                 )}
-
-                <p className="mt-2 text-xs text-gray-400 dark:text-gray-600">
-                  ⚠️ Señales basadas en historial completo desde {signalChartData[0]?.date ?? '…'}. No constituye asesoría financiera.
-                </p>
               </div>
             )}
 
