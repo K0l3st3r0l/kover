@@ -34,6 +34,28 @@ _HEADERS = {
 
 MINDICADOR_BASE = "https://mindicador.cl/api"
 
+# Alpha Vantage (opcional, free: 25 req/día) — usado solo para el "resultado
+# real" de eventos macro US en el calendario. Sin key, esos campos quedan
+# vacíos y el calendario sigue funcionando igual que antes.
+ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
+AV_CACHE_TTL = 24 * 3600  # 24h — estos indicadores se publican como máximo 1 vez/mes
+
+# event_id -> (función Alpha Vantage, formato de valor)
+_AV_EVENT_FUNCTIONS = {
+    "fomc":       ("FEDERAL_FUNDS_RATE", "percent"),
+    "cpi_us":     ("CPI", "index"),
+    "nfp":        ("NONFARM_PAYROLL", "index"),
+    "retail_us":  ("RETAIL_SALES", "index"),
+    "gdp_us":     ("REAL_GDP", "index"),
+}
+
+# event_id (CL) -> key del indicador ya cubierto por mindicador.cl
+_CL_EVENT_INDICATOR = {
+    "ipc_cl":     "ipc",
+    "tpm_cl":     "tpm",
+    "imacec_cl":  "imacec",
+}
+
 # Indicadores CL desde mindicador
 # freq: "daily" -> cambio vs día anterior
 #       "monthly" -> cambio vs el valor del mes anterior (ya viene en %)
@@ -97,11 +119,11 @@ def _load_disk(key: str):
     return None
 
 
-def _cached(key: str):
+def _cached(key: str, ttl: int = MACRO_CACHE_TTL):
     entry = _macro_cache.get(key)
     if entry:
         data, ts = entry
-        if time.time() - ts < MACRO_CACHE_TTL:
+        if time.time() - ts < ttl:
             return data
     return None
 
@@ -255,6 +277,69 @@ def _fetch_us_indicators() -> List[Dict]:
         except Exception as e:
             print(f"[macro] yfinance {ind['ticker']} error: {e}")
     return results
+
+
+# ---------------------------------------------------------------------------
+# Resultados reales de eventos US — Alpha Vantage (opcional)
+# ---------------------------------------------------------------------------
+
+def _fetch_av_series(function: str) -> Optional[List[Dict]]:
+    """Serie histórica de un indicador económico Alpha Vantage. None si falla
+    o no hay key configurada."""
+    if not ALPHA_VANTAGE_KEY:
+        return None
+    try:
+        url = f"https://www.alphavantage.co/query?function={function}&apikey={ALPHA_VANTAGE_KEY}"
+        resp = requests.get(url, headers=_HEADERS, timeout=8)
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        return data or None
+    except Exception as e:
+        print(f"[macro] alpha_vantage {function} error: {e}")
+        return None
+
+
+def _fetch_us_event_actuals() -> Dict[str, Dict]:
+    """Último resultado publicado por evento US, vía Alpha Vantage. TTL largo
+    (24h) porque estos indicadores se publican como máximo 1 vez al mes y la
+    key gratuita tiene límite de 25 requests/día."""
+    cached = _cached("us_actuals", AV_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    result: Dict[str, Dict] = {}
+    if ALPHA_VANTAGE_KEY:
+        for event_id, (func, fmt) in _AV_EVENT_FUNCTIONS.items():
+            series = _fetch_av_series(func)
+            if not series:
+                continue
+            try:
+                latest = series[0]
+                prev = series[1] if len(series) > 1 else None
+                value = float(latest["value"])
+                value_prev = float(prev["value"]) if prev else None
+                change_pct = None
+                if value_prev and value_prev != 0:
+                    change_pct = round((value - value_prev) / value_prev * 100, 2)
+                result[event_id] = {
+                    "value": value,
+                    "previous": value_prev,
+                    "change_pct": change_pct,
+                    "as_of": latest.get("date"),
+                    "format": fmt,
+                }
+            except (KeyError, ValueError, TypeError):
+                continue
+
+    # Respaldo: completar con el último dato bueno en disco si AV falló o no
+    # hay key (no sobreescribe lo que sí se obtuvo fresco).
+    last_good = _load_disk("us_actuals") or {}
+    for k, v in last_good.items():
+        if k not in result:
+            result[k] = {**v, "stale": True}
+
+    _set_cache("us_actuals", result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -423,16 +508,44 @@ def _next_occurrence(ev: Dict, today: date) -> date:
     return min(candidates) if candidates else today
 
 
+def _prev_occurrence(ev: Dict, today: date) -> Optional[date]:
+    """Calcula la ocurrencia anterior más reciente (estrictamente antes de hoy),
+    para mostrar el resultado de eventos que ya pasaron."""
+    year, month = today.year, today.month
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    candidates: List[date] = []
+
+    if "day_of_month" in ev and ev["day_of_month"] is not None:
+        for ym in [(prev_year, prev_month), (year, month)]:
+            try:
+                d = date(ym[0], ym[1], ev["day_of_month"])
+                if d < today:
+                    candidates.append(d)
+            except ValueError:
+                pass
+    else:
+        n_map = {"first": 1, "second": 2, "third": 3, "last": -1}
+        n = n_map.get(ev.get("week_of_month", "first"), 1)
+        for ym in [(prev_year, prev_month), (year, month)]:
+            try:
+                d = _nth_weekday(ym[0], ym[1], ev["day_of_week"], n)
+                if d < today:
+                    candidates.append(d)
+            except ValueError:
+                pass
+
+    return max(candidates) if candidates else None
+
+
 def _tag_when(d: date, today: date) -> str:
     delta = (d - today).days
     if delta < 0:
-        return "pasado"
+        return f"hace {-delta}d"
     if delta == 0:
         return "hoy"
     if delta == 1:
         return "mañana"
-    if delta <= 7:
-        return f"en {delta}d"
     return f"en {delta}d"
 
 
@@ -466,38 +579,82 @@ class MacroDataService:
         return data
 
     @staticmethod
-    def get_calendar(days_ahead: int = 14) -> Dict:
-        """Retorna eventos macro de los próximos `days_ahead` días."""
-        cached = _cached("calendar")
+    def get_calendar(days_ahead: int = 14, days_back: int = 0) -> Dict:
+        """Retorna eventos macro de los próximos `days_ahead` días. Si
+        `days_back` > 0, también incluye la ocurrencia anterior de cada
+        evento (hasta esa cantidad de días atrás) con su resultado real,
+        cuando hay fuente disponible (mindicador.cl para CL, Alpha Vantage
+        para US)."""
+        cache_key = f"calendar_{days_ahead}_{days_back}"
+        cached = _cached(cache_key)
         if cached is not None:
             return cached
 
         today = date.today()
         end = today + timedelta(days=days_ahead)
-        events: List[Dict] = []
-        for ev in _RECURRING_EVENTS:
-            next_d = _next_occurrence(ev, today)
-            when = _tag_when(next_d, today)
-            events.append({
+        us_actuals = MacroDataService._fetch_us_event_actuals_safe()
+        cl_indicators = {i["key"]: i for i in MacroDataService.get_indicators().get("cl", [])}
+
+        def build_event(ev: Dict, d: date) -> Dict:
+            event = {
                 "id": ev["id"],
                 "name": ev["name"],
                 "country": ev["country"],
                 "impact": ev["impact"],
                 "category": ev["category"],
-                "date": next_d.isoformat(),
+                "date": d.isoformat(),
                 "hour_cl": ev.get("hour_cl", ""),
-                "when": when,
-            })
+                "when": _tag_when(d, today),
+            }
+            cl_key = _CL_EVENT_INDICATOR.get(ev["id"])
+            if cl_key and cl_key in cl_indicators:
+                ind = cl_indicators[cl_key]
+                event.update({
+                    "actual": ind.get("value"),
+                    "actual_previous": ind.get("previous"),
+                    "actual_change_pct": ind.get("change_pct"),
+                    "actual_date": ind.get("as_of"),
+                    "actual_format": ind.get("format"),
+                    "actual_source": "mindicador.cl",
+                })
+            elif ev["id"] in us_actuals:
+                a = us_actuals[ev["id"]]
+                event.update({
+                    "actual": a.get("value"),
+                    "actual_previous": a.get("previous"),
+                    "actual_change_pct": a.get("change_pct"),
+                    "actual_date": a.get("as_of"),
+                    "actual_format": a.get("format"),
+                    "actual_source": "alpha_vantage" + (" (caché)" if a.get("stale") else ""),
+                })
+            return event
+
+        events: List[Dict] = []
+        for ev in _RECURRING_EVENTS:
+            next_d = _next_occurrence(ev, today)
+            events.append(build_event(ev, next_d))
+            if days_back > 0:
+                prev_d = _prev_occurrence(ev, today)
+                if prev_d and (today - prev_d).days <= days_back:
+                    events.append(build_event(ev, prev_d))
         events.sort(key=lambda e: e["date"])
 
         data = {
             "events": events,
-            "from": today.isoformat(),
+            "from": (today - timedelta(days=days_back)).isoformat(),
             "to": end.isoformat(),
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
-        _set_cache("calendar", data)
+        _set_cache(cache_key, data)
         return data
+
+    @staticmethod
+    def _fetch_us_event_actuals_safe() -> Dict:
+        try:
+            return _fetch_us_event_actuals()
+        except Exception as e:
+            print(f"[macro] us_event_actuals error: {e}")
+            return {}
 
     @staticmethod
     def build_ai_context() -> str:

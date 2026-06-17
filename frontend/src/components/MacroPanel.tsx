@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import api from '../services/api'
 
-interface MacroIndicator {
+export interface MacroIndicator {
   key: string
   name: string
   country: 'CL' | 'US'
@@ -18,7 +19,7 @@ interface MacroResponse {
   generated_at: string
 }
 
-interface MacroEvent {
+export interface MacroEvent {
   id: string
   name: string
   country: 'CL' | 'US'
@@ -27,16 +28,22 @@ interface MacroEvent {
   date: string
   hour_cl: string
   when: string
+  actual?: number | null
+  actual_previous?: number | null
+  actual_change_pct?: number | null
+  actual_date?: string | null
+  actual_format?: MacroIndicator['format'] | null
+  actual_source?: string | null
 }
 
-interface CalendarResponse {
+export interface CalendarResponse {
   events: MacroEvent[]
   from: string
   to: string
   generated_at: string
 }
 
-function formatValue(i: MacroIndicator): string {
+export function formatValue(i: { value: number | null; format: MacroIndicator['format'] }): string {
   if (i.value === null || i.value === undefined) return '—'
   if (i.format === 'currency') return `$${i.value.toLocaleString('es-CL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   if (i.format === 'percent') return `${i.value.toFixed(2)}%`
@@ -44,7 +51,7 @@ function formatValue(i: MacroIndicator): string {
   return i.value.toLocaleString('es-CL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
-function ChangeBadge({ pct }: { pct: number | null }) {
+export function ChangeBadge({ pct }: { pct: number | null | undefined }) {
   if (pct === null || pct === undefined) return <span className="text-xs text-gray-400">—</span>
   const isUp = pct >= 0
   return (
@@ -75,7 +82,7 @@ function IndicatorCard({ i }: { i: MacroIndicator }) {
   )
 }
 
-function ImpactDots({ impact }: { impact: 1 | 2 | 3 }) {
+export function ImpactDots({ impact }: { impact: 1 | 2 | 3 }) {
   return (
     <span className="text-amber-500 dark:text-amber-400 tracking-tight" title={`Impacto ${impact}/3`}>
       {'★'.repeat(impact)}<span className="text-gray-300 dark:text-gray-600">{'★'.repeat(3 - impact)}</span>
@@ -109,7 +116,7 @@ export default function MacroPanel() {
     try {
       const [m, c] = await Promise.all([
         api.get<MacroResponse>('/api/news/macro', { timeout: 30000 }),
-        api.get<CalendarResponse>('/api/news/macro-calendar', { timeout: 10000 }),
+        api.get<CalendarResponse>('/api/news/macro-calendar', { params: { days_back: 3 }, timeout: 10000 }),
       ])
       setMacro(m.data)
       setCalendar(c.data)
@@ -122,7 +129,14 @@ export default function MacroPanel() {
 
   useEffect(() => { fetchAll() }, [])
 
-  const upcoming = (calendar?.events || []).filter(e => e.when !== 'pasado').slice(0, 5)
+  const isRecentPast = (when: string) => {
+    const m = when.match(/^hace (\d+)d$/)
+    return m ? parseInt(m[1], 10) <= 3 : false
+  }
+  const upcoming = (calendar?.events || [])
+    .filter(e => e.when === 'hoy' || e.when === 'mañana' || e.when.startsWith('en ') || isRecentPast(e.when))
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(0, 6)
   const cl = (macro?.cl || []).filter(i => i.value !== null)
   const us = (macro?.us || []).filter(i => i.value !== null)
 
@@ -197,9 +211,13 @@ export default function MacroPanel() {
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-2">
                 {upcoming.map(e => {
-                  const whenCls = WHEN_STYLES[e.when] || 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'
+                  const past = isRecentPast(e.when)
+                  const whenCls = past
+                    ? 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300'
+                    : (WHEN_STYLES[e.when] || 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300')
+                  const hasResult = e.actual !== undefined && e.actual !== null
                   return (
-                    <div key={e.id} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
+                    <div key={`${e.id}-${e.date}`} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700">
                       <div className="flex flex-col items-center min-w-[42px]">
                         <span className="text-[10px] font-bold text-gray-700 dark:text-gray-300 uppercase">
                           {eventDateLabel(e.date, e.hour_cl).split(' ')[0]}
@@ -218,20 +236,40 @@ export default function MacroPanel() {
                         <p className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate" title={e.name}>
                           {e.name}
                         </p>
-                        <p className="text-[10px] text-gray-500 dark:text-gray-400">
-                          {e.hour_cl} CL
-                          {e.when !== 'hoy' && e.when !== 'mañana' && ` · ${e.when}`}
-                        </p>
+                        {hasResult ? (
+                          <p className="text-[10px] font-semibold text-gray-700 dark:text-gray-300 truncate">
+                            Resultado: {formatValue({ value: e.actual ?? null, format: e.actual_format || 'index' })}
+                            {e.actual_change_pct !== undefined && e.actual_change_pct !== null && (
+                              <span className="ml-1"><ChangeBadge pct={e.actual_change_pct} /></span>
+                            )}
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-gray-500 dark:text-gray-400">
+                            {e.hour_cl} CL
+                            {!past && e.when !== 'hoy' && e.when !== 'mañana' && ` · ${e.when}`}
+                          </p>
+                        )}
                       </div>
                       {(e.when === 'hoy' || e.when === 'mañana') && (
                         <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${whenCls}`}>
                           {e.when}
                         </span>
                       )}
+                      {past && (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${whenCls}`}>
+                          salió
+                        </span>
+                      )}
                     </div>
                   )
                 })}
               </div>
+              <Link
+                to="/noticias/calendario"
+                className="inline-block mt-2 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200"
+              >
+                Ver calendario completo →
+              </Link>
             </div>
           )}
         </div>

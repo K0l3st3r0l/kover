@@ -33,6 +33,7 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       AI_API_URL: ${AI_API_URL:-https://opencode.ai/zen/go}
       AI_API_KEY: ${AI_API_KEY:-}
+      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
     volumes:
       - ./backend/cache:/app/cache
     depends_on:

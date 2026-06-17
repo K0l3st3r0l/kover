@@ -90,10 +90,14 @@ def get_macro_indicators():
 
 
 @router.get("/macro-calendar")
-def get_macro_calendar(days: int = Query(default=14, ge=1, le=60)):
-    """Calendario económico curado de los próximos `days` días."""
+def get_macro_calendar(
+    days: int = Query(default=14, ge=1, le=60),
+    days_back: int = Query(default=0, ge=0, le=180),
+):
+    """Calendario económico curado: próximos `days` días, más opcionalmente
+    `days_back` días de histórico con el resultado real publicado."""
     try:
-        return MacroDataService.get_calendar(days_ahead=days)
+        return MacroDataService.get_calendar(days_ahead=days, days_back=days_back)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Error cargando calendario: {e}")
 

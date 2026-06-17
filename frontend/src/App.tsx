@@ -14,6 +14,7 @@ import TaxReport from './pages/TaxReport'
 import ImportIB from './pages/ImportIB'
 import ChileanMarkets from './pages/ChileanMarkets'
 import News from './pages/News'
+import MacroCalendar from './pages/MacroCalendar'
 import Dividends from './pages/Dividends'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
@@ -249,6 +250,7 @@ function AppContent() {
           <Route path="/import-ib"    element={<PrivateRoute><ImportIB /></PrivateRoute>} />
           <Route path="/mercado-cl"   element={<PrivateRoute><ChileanMarkets /></PrivateRoute>} />
           <Route path="/noticias"     element={<PrivateRoute><News /></PrivateRoute>} />
+          <Route path="/noticias/calendario" element={<PrivateRoute><MacroCalendar /></PrivateRoute>} />
           <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>
