@@ -14,6 +14,8 @@ import requests
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from ..market.macro_data import MacroDataService
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -604,6 +606,16 @@ def _build_ai_market_context(days: int = 200) -> dict:
         logger.warning(f"Cartera composition no disponible, se usa límite legal: {e}")
         cartera = None
 
+    # Contexto macro internacional + calendario económico, reutilizando el mismo
+    # bloque que alimenta el análisis de /noticias (DXY, oro, WTI, US 10Y, VIX,
+    # FOMC/NFP/CPI...). Los fondos A/B tienen 65-83% de renta variable extranjera,
+    # así que estos indicadores son los que realmente mueven su desempeño.
+    try:
+        macro_global = MacroDataService.build_ai_context()
+    except Exception as e:
+        logger.warning(f"Contexto macro global no disponible: {e}")
+        macro_global = ""
+
     years = [today.year - 1, today.year]
     tpm_series = _fetch_mindicador("tpm", years)
     ipc_series = _fetch_mindicador("ipc", years)
@@ -636,6 +648,7 @@ def _build_ai_market_context(days: int = 200) -> dict:
         "dolar_last": dolar_last,
         "dolar_range_60d": dolar_range,
         "cartera": cartera,
+        "macro_global": macro_global,
         "horizon_years": AI_INVESTMENT_HORIZON_YEARS,
     }
 
@@ -678,6 +691,14 @@ def _ai_context_to_text(ctx: dict) -> str:
         f"{funds['A']['spread_vs_first'] - funds['E']['spread_vs_first']:.2f} puntos"
     )
     lines.append(f"- Horizonte de inversión del usuario: {ctx['horizon_years']} años")
+
+    macro_global = ctx.get("macro_global")
+    if macro_global:
+        lines.append(
+            "\nContexto macro internacional y calendario económico "
+            "(clave para los fondos con alta exposición a renta variable extranjera):\n"
+            f"{macro_global}"
+        )
     return "\n".join(lines)
 
 
