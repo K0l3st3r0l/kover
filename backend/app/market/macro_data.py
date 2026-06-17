@@ -11,9 +11,12 @@ Calendario:
   - Marca cuáles salen "hoy", "mañana" o "esta semana".
 """
 
+import json
+import os
 import time
 import requests
 from datetime import datetime, date, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -56,9 +59,42 @@ US_TICKERS = [
     {"ticker": "^VIX",     "name": "VIX",              "country": "US", "format": "index"},
 ]
 
-# Cache
+# Respaldo de los indicadores de mercado vía yfinance (ya es dependencia) cuando
+# mindicador.cl falla. Solo aplica a los de precio de mercado — TPM/IPC/Imacec no
+# tienen equivalente en yfinance y se cubren con el last-known-good en disco.
+CL_YF_FALLBACK = {
+    "dolar":       "CLP=X",
+    "euro":        "EURCLP=X",
+    "libra_cobre": "HG=F",
+}
+
+# Cache: memoria (TTL corto) + disco (last-known-good, sobrevive reinicios y
+# caídas de la fuente).
 _macro_cache: Dict[str, tuple] = {}
 MACRO_CACHE_TTL = 1800  # 30 min — los indicadores no cambian cada segundo
+MACRO_DISK_DIR = Path(os.getenv("MACRO_CACHE_DIR", "/app/cache/macro"))
+
+
+def _disk_path(key: str) -> Path:
+    return MACRO_DISK_DIR / f"{key}.json"
+
+
+def _save_disk(key: str, data) -> None:
+    try:
+        MACRO_DISK_DIR.mkdir(parents=True, exist_ok=True)
+        _disk_path(key).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[macro] disk save {key}: {e}")
+
+
+def _load_disk(key: str):
+    try:
+        p = _disk_path(key)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[macro] disk load {key}: {e}")
+    return None
 
 
 def _cached(key: str):
@@ -72,6 +108,24 @@ def _cached(key: str):
 
 def _set_cache(key: str, data):
     _macro_cache[key] = (data, time.time())
+    _save_disk(key, data)
+
+
+def _merge_last_good(fresh: List[Dict], prev: List[Dict]) -> List[Dict]:
+    """Completa los indicadores que faltan en `fresh` (fuente caída) con el
+    último valor bueno de `prev`, marcándolos como `stale`."""
+    by_key = {r["key"]: r for r in fresh if r.get("value") is not None}
+    for old in prev:
+        k = old.get("key")
+        if k and k not in by_key:
+            by_key[k] = {**old, "stale": True}
+    ordered, seen = [], set()
+    for ref in prev + fresh:
+        k = ref.get("key")
+        if k in by_key and k not in seen:
+            ordered.append(by_key[k])
+            seen.add(k)
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +177,48 @@ def _fetch_cl_indicators() -> List[Dict]:
             })
         except Exception as e:
             print(f"[macro] mindicador {ind['key']} error: {e}")
+
+    # Respaldo: para los indicadores de mercado que mindicador no entregó, tirar
+    # de yfinance (USD/CLP, EUR/CLP, cobre). Misma unidad que mindicador.
+    got = {r["key"] for r in results if r.get("value") is not None}
+    for ind in CL_INDICATORS:
+        key = ind["key"]
+        if key in got or key not in CL_YF_FALLBACK:
+            continue
+        yf_data = _yf_latest(CL_YF_FALLBACK[key])
+        if not yf_data:
+            continue
+        latest, prev, as_of = yf_data
+        cambio_pct = None
+        if prev and prev != 0:
+            cambio_pct = round((latest - prev) / prev * 100, 2)
+        results.append({
+            "key": key,
+            "name": ind["name"],
+            "country": ind["country"],
+            "format": ind["format"],
+            "value": round(latest, 4),
+            "previous": round(prev, 4) if prev is not None else None,
+            "change_pct": cambio_pct,
+            "as_of": as_of,
+            "source": "yfinance (respaldo)",
+        })
     return results
+
+
+def _yf_latest(ticker: str):
+    """Último cierre y cierre previo de un ticker yfinance. None si falla."""
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="5d")
+        if hist.empty:
+            return None
+        latest = float(hist["Close"].iloc[-1])
+        prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else None
+        return latest, prev, hist.index[-1].strftime("%Y-%m-%d")
+    except Exception as e:
+        print(f"[macro] yfinance fallback {ticker} error: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +450,13 @@ class MacroDataService:
             return cached
         cl = _fetch_cl_indicators()
         us = _fetch_us_indicators()
+
+        # Si alguna fuente falló y faltan indicadores, completar con el último
+        # valor bueno persistido en disco (marcado como stale).
+        last_good = _load_disk("indicators") or {}
+        cl = _merge_last_good(cl, last_good.get("cl", []))
+        us = _merge_last_good(us, last_good.get("us", []))
+
         data = {
             "cl": cl,
             "us": us,
@@ -425,7 +527,12 @@ class MacroDataService:
                 v_str = f"${v:,.2f}"
             else:
                 v_str = f"{v:,.2f}"
-            lines.append(f"  - {i['name']} ({i['country']}): {v_str}{chg_str}")
+            flag = ""
+            if i.get("stale"):
+                flag = f" [dato del {i.get('as_of', '?')}, fuente sin conexión]"
+            elif i.get("source"):
+                flag = f" [{i['source']}]"
+            lines.append(f"  - {i['name']} ({i['country']}): {v_str}{chg_str}{flag}")
 
         ind_block = "\n".join(lines) if lines else "  (no disponible)"
 

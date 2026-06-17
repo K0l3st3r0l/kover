@@ -415,6 +415,7 @@ def _compute_obv(records: list) -> list:
 
 # -- mindicador.cl (public, no auth) ------------------------------------------
 MINDICADOR_BASE = "https://mindicador.cl/api"
+MINDICADOR_CACHE_DIR = Path(os.getenv("MINDICADOR_CACHE_DIR", "/app/cache/mindicador"))
 
 MACRO_INDICATORS = {
     "tpm":            {"label": "TPM Banco Central",   "unit": "%",    "freq": "diaria"},
@@ -424,6 +425,24 @@ MACRO_INDICATORS = {
     "tasa_desempleo": {"label": "Tasa de Desempleo",   "unit": "%",    "freq": "trimestral"},
     "imacec":         {"label": "IMACEC",              "unit": "%",    "freq": "mensual"},
 }
+
+
+def _save_mindicador_cache(indicator: str, series: list) -> None:
+    try:
+        MINDICADOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (MINDICADOR_CACHE_DIR / f"{indicator}.json").write_text(json.dumps(series), encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"mindicador cache write {indicator}: {e}")
+
+
+def _load_mindicador_cache(indicator: str) -> list:
+    try:
+        path = MINDICADOR_CACHE_DIR / f"{indicator}.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"mindicador cache read {indicator}: {e}")
+    return []
 
 
 def _fetch_mindicador(indicator: str, years: list[int]) -> list:
@@ -437,10 +456,20 @@ def _fetch_mindicador(indicator: str, years: list[int]) -> list:
                 records[date_str] = item["valor"]
         except Exception as e:
             logger.warning(f"mindicador {indicator}/{year}: {e}")
-    return sorted(
+
+    series = sorted(
         [{"date": k, "value": v} for k, v in records.items()],
         key=lambda x: x["date"],
     )
+    if series:
+        _save_mindicador_cache(indicator, series)
+        return series
+
+    # Fuente caída: servir el último dato bueno persistido en disco.
+    cached = _load_mindicador_cache(indicator)
+    if cached:
+        logger.info(f"mindicador {indicator}: sirviendo desde caché en disco (fuente caída)")
+    return cached
 
 
 @router.get("/macro-cl")
