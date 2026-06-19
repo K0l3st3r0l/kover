@@ -659,7 +659,7 @@ ZERO_VALUE_CLOSE_TYPES = {"OPTION_EXPIRY", "BUY_CALL", "BUY_PUT"}
 ZERO_CLOSE_DATE_MARGIN_DAYS = 3
 
 
-def build_existing_hashes(db: Session, current_user: User) -> tuple[set, dict]:
+def build_existing_hashes(db: Session, current_user: User) -> tuple[set, dict, dict]:
     existing_txs = (
         db.query(Transaction)
         .filter(Transaction.user_id == current_user.id)
@@ -668,27 +668,33 @@ def build_existing_hashes(db: Session, current_user: User) -> tuple[set, dict]:
 
     existing_hashes: set = set()
     existing_zero_closes: dict[tuple[str, float], list[datetime]] = {}
+    # Una misma orden de IB puede quedar registrada en BD como varias filas
+    # (ej. fills parciales importados por separado) en vez de la fila agregada
+    # que trae el CSV. Se agrupa por (ticker, fecha, tipo) para poder comparar
+    # la suma de cantidad/total contra la fila nueva.
+    existing_groups: dict[tuple[str, str, str], dict] = {}
     for t in existing_txs:
         total_abs = round(abs(t.total_amount), 2)
-        sig = (
-            t.ticker,
-            t.transaction_date.strftime("%Y-%m-%d"),
-            t.transaction_type.value,
-            total_abs,
-            round(t.quantity, 4),
-        )
+        date_str = t.transaction_date.strftime("%Y-%m-%d")
+        sig = (t.ticker, date_str, t.transaction_type.value, total_abs, round(t.quantity, 4))
         existing_hashes.add(sig)
 
         if t.transaction_type.value in ZERO_VALUE_CLOSE_TYPES and total_abs == 0.0:
             key = (t.ticker, round(t.quantity, 4))
             existing_zero_closes.setdefault(key, []).append(t.transaction_date)
 
-    return existing_hashes, existing_zero_closes
+        group_key = (t.ticker, date_str, t.transaction_type.value)
+        group = existing_groups.setdefault(group_key, {"qty_sum": 0.0, "total_sum": 0.0, "count": 0})
+        group["qty_sum"] += t.quantity
+        group["total_sum"] += total_abs
+        group["count"] += 1
+
+    return existing_hashes, existing_zero_closes, existing_groups
 
 
 def build_preview_response(raw_rows: list[dict], parse_errors: list[str], db: Session, current_user: User) -> PreviewResponse:
-    existing_hashes, existing_zero_closes = build_existing_hashes(db, current_user)
-    parsed, build_errors = build_parsed_transactions(raw_rows, existing_hashes, existing_zero_closes)
+    existing_hashes, existing_zero_closes, existing_groups = build_existing_hashes(db, current_user)
+    parsed, build_errors = build_parsed_transactions(raw_rows, existing_hashes, existing_zero_closes, existing_groups)
     all_errors = parse_errors + build_errors
 
     tickers_acciones = sorted({
@@ -711,6 +717,7 @@ def build_parsed_transactions(
     raw_rows: list[dict],
     existing_hashes: set,
     existing_zero_closes: Optional[dict] = None,
+    existing_groups: Optional[dict] = None,
 ) -> tuple[list[ParsedTransaction], list[str]]:
     """
     Convierte las filas crudas en ParsedTransaction.
@@ -719,6 +726,7 @@ def build_parsed_transactions(
     results: list[ParsedTransaction] = []
     errors: list[str] = []
     zero_closes = existing_zero_closes or {}
+    groups = existing_groups or {}
 
     for raw in raw_rows:
         line = raw["line"]
@@ -830,6 +838,19 @@ def build_parsed_transactions(
                 if abs((existing_dt.date() - dt.date()).days) <= ZERO_CLOSE_DATE_MARGIN_DAYS:
                     duplicado = True
                     break
+
+        # Fallback: la misma orden puede estar en BD repartida en varias filas
+        # (fills parciales) en vez de la fila agregada que trae el CSV. Si la suma
+        # de cantidad/total del grupo (ticker+fecha+tipo) ya existente calza con
+        # esta fila, es la misma operación ya importada.
+        if not duplicado:
+            group = groups.get((ticker, dt.strftime("%Y-%m-%d"), tipo.value))
+            if (
+                group and group["count"] > 1
+                and round(group["qty_sum"], 4) == round(cantidad, 4)
+                and round(group["total_sum"], 2) == round(total_usd, 2)
+            ):
+                duplicado = True
 
         results.append(ParsedTransaction(
             ib_row=line,
