@@ -649,7 +649,17 @@ def parse_manual_trades_text(content: str, trade_date: str) -> tuple[list[dict],
     return rows, errors
 
 
-def build_existing_hashes(db: Session, current_user: User) -> set:
+# Un cierre de opción sin valor puede quedar registrado como OPTION_EXPIRY o como
+# BUY_CALL/BUY_PUT ("Cierre Call/Put") según la vía de importación usada (CSV de
+# Trades vs texto pegado de la tabla con "EXPIRED ... on OCC"). Para el detector de
+# duplicados estos tipos son equivalentes cuando el monto es $0.
+ZERO_VALUE_CLOSE_TYPES = {"OPTION_EXPIRY", "BUY_CALL", "BUY_PUT"}
+# Margen de días porque la fecha registrada puede ser la de expiración o la de
+# liquidación (settlement), que IB reporta con hasta un par de días de diferencia.
+ZERO_CLOSE_DATE_MARGIN_DAYS = 3
+
+
+def build_existing_hashes(db: Session, current_user: User) -> tuple[set, dict]:
     existing_txs = (
         db.query(Transaction)
         .filter(Transaction.user_id == current_user.id)
@@ -657,21 +667,28 @@ def build_existing_hashes(db: Session, current_user: User) -> set:
     )
 
     existing_hashes: set = set()
+    existing_zero_closes: dict[tuple[str, float], list[datetime]] = {}
     for t in existing_txs:
+        total_abs = round(abs(t.total_amount), 2)
         sig = (
             t.ticker,
             t.transaction_date.strftime("%Y-%m-%d"),
             t.transaction_type.value,
-            round(abs(t.total_amount), 2),
+            total_abs,
             round(t.quantity, 4),
         )
         existing_hashes.add(sig)
 
-    return existing_hashes
+        if t.transaction_type.value in ZERO_VALUE_CLOSE_TYPES and total_abs == 0.0:
+            key = (t.ticker, round(t.quantity, 4))
+            existing_zero_closes.setdefault(key, []).append(t.transaction_date)
+
+    return existing_hashes, existing_zero_closes
 
 
 def build_preview_response(raw_rows: list[dict], parse_errors: list[str], db: Session, current_user: User) -> PreviewResponse:
-    parsed, build_errors = build_parsed_transactions(raw_rows, build_existing_hashes(db, current_user))
+    existing_hashes, existing_zero_closes = build_existing_hashes(db, current_user)
+    parsed, build_errors = build_parsed_transactions(raw_rows, existing_hashes, existing_zero_closes)
     all_errors = parse_errors + build_errors
 
     tickers_acciones = sorted({
@@ -693,6 +710,7 @@ def build_preview_response(raw_rows: list[dict], parse_errors: list[str], db: Se
 def build_parsed_transactions(
     raw_rows: list[dict],
     existing_hashes: set,
+    existing_zero_closes: Optional[dict] = None,
 ) -> tuple[list[ParsedTransaction], list[str]]:
     """
     Convierte las filas crudas en ParsedTransaction.
@@ -700,6 +718,7 @@ def build_parsed_transactions(
     """
     results: list[ParsedTransaction] = []
     errors: list[str] = []
+    zero_closes = existing_zero_closes or {}
 
     for raw in raw_rows:
         line = raw["line"]
@@ -803,6 +822,14 @@ def build_parsed_transactions(
         # Detectar duplicado usando una firma de la operación
         sig = (ticker, dt.strftime("%Y-%m-%d"), tipo.value, round(total_usd, 2), round(cantidad, 4))
         duplicado = sig in existing_hashes
+
+        # Fallback: cierres de opción sin valor (OPTION_EXPIRY / BUY_CALL / BUY_PUT a $0)
+        # pueden estar ya en BD bajo otro tipo y/o con fecha de liquidación distinta.
+        if not duplicado and tipo.value in ZERO_VALUE_CLOSE_TYPES and round(total_usd, 2) == 0.0:
+            for existing_dt in zero_closes.get((ticker, round(cantidad, 4)), []):
+                if abs((existing_dt.date() - dt.date()).days) <= ZERO_CLOSE_DATE_MARGIN_DAYS:
+                    duplicado = True
+                    break
 
         results.append(ParsedTransaction(
             ib_row=line,
