@@ -33,6 +33,9 @@ yarn-error.log*
 *.db
 *.sqlite
 
+# Respaldos de la base: contienen datos de producción. El repo es público.
+backups/
+
 # Docker
 .dockerignore
 
