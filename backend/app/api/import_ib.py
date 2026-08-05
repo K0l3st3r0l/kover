@@ -5,9 +5,13 @@ Soporta el formato CSV exportado desde:
   IB Client Portal / TWS → Reports → Activity → Statements → Format: CSV
 
 Las secciones que se procesan:
-  - Trades       → acciones (Stocks) y opciones (Equity and Index Options)
-  - Dividends    → dividendos
+  - Trades                  → acciones (Stocks) y opciones (Equity and Index Options)
+  - Dividends               → dividendos
+  - Deposits & Withdrawals  → movimientos de efectivo (ticker sintético CASH)
   - Corporate Actions con "Assignment" → asignaciones
+
+Las asignaciones no llegan por Corporate Actions: IB las reporta como filas de
+Trades con el código `A` (dos patas, la del contrato y la de las acciones).
 
 Cómo exportar desde IB:
   1. Ir a Reports → Activity → Statements
@@ -51,6 +55,7 @@ class ParsedTransaction(BaseModel):
     strike_price: Optional[float] = None   # solo para opciones
     expiration_date: Optional[str] = None  # YYYY-MM-DD, solo para opciones
     opt_type: Optional[str] = None         # C o P, solo para opciones
+    es_asignacion: bool = False            # el contrato se cerró por asignación
 
 
 class PreviewResponse(BaseModel):
@@ -223,7 +228,25 @@ TIPO_LABELS = {
     "DIVIDEND":      "Dividendo",
     "ASSIGNMENT":    "Asignación",
     "OPTION_EXPIRY": "Expiración Opción",
+    "DEPOSIT":       "Depósito",
+    "WITHDRAWAL":    "Retiro",
 }
+
+# Los movimientos de efectivo no tienen instrumento, pero `Transaction.ticker`
+# es NOT NULL. Este ticker sintético los agrupa sin ensuciar el portafolio:
+# ningún `Stock` se llama así, por lo que quedan con `stock_id = NULL`.
+CASH_TICKER = "CASH"
+
+
+def has_ib_code(code: str, target: str) -> bool:
+    """
+    ¿El campo Code de IB contiene el código `target`?
+
+    Viene como lista separada por `;` ("A;C", "IM;O;P"). Hay que comparar token
+    a token: buscar el substring "A" daría positivo en "IA" (importado ajustado),
+    que no tiene nada que ver con una asignación.
+    """
+    return target in {token.strip() for token in (code or "").split(";")}
 
 
 def parse_float(value: str) -> float:
@@ -363,6 +386,7 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
                 "proceeds": parse_float(proceeds_str),
                 "comm_fee": parse_float(comm_str),
                 "description": "",
+                "code": code,
             })
 
         # ── Sección Dividends ───────────────────────────────────────────────
@@ -392,6 +416,28 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
                 "proceeds": parse_float(amount_str),
                 "comm_fee": 0.0,
                 "description": description,
+            })
+
+        # ── Sección Deposits & Withdrawals ──────────────────────────────────
+        elif section == "Deposits & Withdrawals":
+            if data.get("Currency", "").strip() == "Total":
+                continue
+
+            amount = parse_float(data.get("Amount", "0"))
+            if amount == 0:
+                continue
+
+            rows.append({
+                "line": line_num,
+                "section": "CashFlow",
+                "asset_category": "Cash",
+                "symbol": CASH_TICKER,
+                "datetime_str": data.get("Settle Date", "").strip(),
+                "quantity": 0.0,
+                "t_price": 0.0,
+                "proceeds": amount,          # el signo distingue depósito de retiro
+                "comm_fee": 0.0,
+                "description": data.get("Description", "").strip(),
             })
 
         # ── Sección Corporate Actions (Assignments) ─────────────────────────
@@ -744,6 +790,7 @@ def build_parsed_transactions(
 
         advertencia = ""
         opt_info = None
+        es_asignacion = False
 
         # ── Dividendo ──────────────────────────────────────────────────────
         if section == "Dividends":
@@ -764,6 +811,16 @@ def build_parsed_transactions(
             cantidad = abs(raw["quantity"])
             precio = raw["t_price"]
             notas = raw.get("description", "Assignment IB")
+
+        # ── Movimiento de efectivo ─────────────────────────────────────────
+        elif section == "CashFlow":
+            monto = raw["proceeds"]
+            ticker = CASH_TICKER
+            tipo = TransactionType.DEPOSIT if monto > 0 else TransactionType.WITHDRAWAL
+            total_usd = abs(monto)
+            cantidad = 0.0
+            precio = 0.0
+            notas = raw.get("description", "Movimiento de efectivo IB")
 
         # ── Expiración de opción sin valor ──────────────────────────────────
         elif section == "OptionExpiry":
@@ -787,6 +844,10 @@ def build_parsed_transactions(
             asset_cat = raw["asset_category"]
             quantity = raw["quantity"]
 
+            # IB marca ambas patas de una asignación con el código `A`: la compra
+            # del contrato a precio 0 y la venta/compra de las acciones al strike.
+            asignado = has_ib_code(raw.get("code", ""), "A")
+
             if "option" in asset_cat.lower():
                 opt_info = parse_ib_option_symbol(symbol)
                 if not opt_info:
@@ -804,6 +865,12 @@ def build_parsed_transactions(
                 _strike = strike
                 _expiry = expiry
                 _opt_type = opt_type
+                # Solo la pata que cierra el contrato (compra) es la asignación.
+                # El tipo sigue siendo BUY_CALL/BUY_PUT — contablemente es un
+                # cierre a $0 — pero marca la opción como ASSIGNED al importar.
+                if asignado and quantity > 0:
+                    es_asignacion = True
+                    notas = f"Asignación | {symbol} | Strike ${strike} | Exp {expiry}"
             else:
                 ticker = symbol.upper()
                 opt_type = None
@@ -811,13 +878,15 @@ def build_parsed_transactions(
                 total_usd = abs(raw["proceeds"])
                 cantidad = abs(quantity)
                 precio = abs(raw["t_price"])
-                notas = "Importado desde IB"
+                # Sigue siendo BUY_STOCK/SELL_STOCK: las acciones se mueven de
+                # verdad y tienen que afectar la posición como cualquier trade.
+                notas = "Asignación | acciones al strike" if asignado else "Importado desde IB"
                 _strike = None
                 _expiry = None
                 _opt_type = None
 
-            # Advertir si precio es 0
-            if precio == 0 and tipo not in (TransactionType.DIVIDEND, TransactionType.ASSIGNMENT):
+            # Advertir si precio es 0 (en una asignación el contrato vale 0 por definición)
+            if precio == 0 and not es_asignacion and tipo not in (TransactionType.DIVIDEND, TransactionType.ASSIGNMENT):
                 advertencia = "Precio T. Price = 0, verifica el registro."
             # Advertir si total_usd difiere significativamente de cantidad × precio
             elif precio > 0 and cantidad > 0:
@@ -869,6 +938,7 @@ def build_parsed_transactions(
             strike_price=_strike if section in ("Trades", "OptionExpiry") else None,
             expiration_date=_expiry if section in ("Trades", "OptionExpiry") else None,
             opt_type=_opt_type if section in ("Trades", "OptionExpiry") else None,
+            es_asignacion=es_asignacion,
         ))
 
     return results, errors
@@ -1172,7 +1242,7 @@ async def confirm_import(
                 if contracts_closing >= open_opt.contracts:
                     # Cierre total
                     per_share_premium = closing_cost / (open_opt.contracts * 100) if open_opt.contracts > 0 else 0.0
-                    open_opt.status = OptionStatus.CLOSED
+                    open_opt.status = OptionStatus.ASSIGNED if t.es_asignacion else OptionStatus.CLOSED
                     open_opt.closed_at = dt_close
                     open_opt.closing_premium = round(per_share_premium, 4)
                     open_opt.realized_pnl = round(open_opt.total_premium - closing_cost, 2)

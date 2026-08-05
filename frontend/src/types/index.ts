@@ -59,8 +59,11 @@ export type TransactionType =
   | 'BUY_CALL' 
   | 'SELL_PUT' 
   | 'BUY_PUT' 
-  | 'ASSIGNMENT' 
-  | 'DIVIDEND';
+  | 'ASSIGNMENT'
+  | 'DIVIDEND'
+  | 'OPTION_EXPIRY'
+  | 'DEPOSIT'
+  | 'WITHDRAWAL';
 
 export interface Transaction {
   id: number;

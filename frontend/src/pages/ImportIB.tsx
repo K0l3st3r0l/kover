@@ -17,6 +17,11 @@ interface ParsedTransaction {
   notas: string
   advertencia: string
   duplicado: boolean
+  // Los devuelve el backend en la preview y se reenvían intactos al confirmar.
+  strike_price?: number | null
+  expiration_date?: string | null
+  opt_type?: string | null
+  es_asignacion?: boolean
 }
 
 interface PreviewResponse {
