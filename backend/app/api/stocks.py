@@ -9,8 +9,18 @@ from ..models.user import User
 from ..utils.auth import get_current_user
 from ..market import MarketDataService
 from ..utils import OptionsCalculator
+from ..services.premium_ledger import load_premium_by_ticker
 
 router = APIRouter()
+
+
+def _apply_ledger_premium(response, stock, premiums: dict) -> None:
+    """Sobrescribe prima y cost basis con el ledger canónico, no con el campo de BD."""
+    bucket = premiums.get(stock.ticker, {})
+    premium_net = round(bucket.get("realized", 0.0) - bucket.get("commissions", 0.0), 2)
+    response.total_premium_earned = premium_net
+    if stock.shares > 0:
+        response.adjusted_cost_basis = round(stock.average_cost - (premium_net / stock.shares), 4)
 
 # Schemas
 class StockCreate(BaseModel):
@@ -120,21 +130,23 @@ def get_stocks(
         query = query.filter(Stock.is_active == True)
     
     stocks = query.all()
-    
+
     # Obtener precios actuales para todas las acciones
     tickers = [s.ticker for s in stocks]
     prices = MarketDataService.get_multiple_prices(tickers)
-    
+    premiums = load_premium_by_ticker(db, current_user.id)
+
     results = []
     for stock in stocks:
         response = StockResponse.from_orm(stock)
         current_price = prices.get(stock.ticker)
-        
+        _apply_ledger_premium(response, stock, premiums)
+
         if current_price:
             response.current_price = current_price
             pnl = OptionsCalculator.calculate_position_pnl(
                 stock.shares,
-                stock.adjusted_cost_basis,
+                response.adjusted_cost_basis,
                 current_price
             )
             response.current_value = pnl["current_value"]
@@ -160,19 +172,20 @@ def get_stock(
         raise HTTPException(status_code=404, detail="Stock not found")
     
     response = StockResponse.from_orm(stock)
+    _apply_ledger_premium(response, stock, load_premium_by_ticker(db, current_user.id))
     current_price = MarketDataService.get_current_price(stock.ticker)
-    
+
     if current_price:
         response.current_price = current_price
         pnl = OptionsCalculator.calculate_position_pnl(
             stock.shares,
-            stock.adjusted_cost_basis,
+            response.adjusted_cost_basis,
             current_price
         )
         response.current_value = pnl["current_value"]
         response.unrealized_pnl = pnl["unrealized_pnl"]
         response.unrealized_pnl_pct = pnl["unrealized_pnl_pct"]
-    
+
     return response
 
 @router.delete("/{stock_id}")
@@ -233,11 +246,14 @@ def search_stocks_advanced(
     # Obtener precios actuales
     tickers = [s.ticker for s in stocks]
     prices = MarketDataService.get_multiple_prices(tickers)
-    
+    premiums = load_premium_by_ticker(db, current_user.id)
+
     results = []
     for stock in stocks:
         current_price = prices.get(stock.ticker)
-        
+        response = StockResponse.from_orm(stock)
+        _apply_ledger_premium(response, stock, premiums)
+
         # Si no hay precio, omitir filtros basados en precio
         if current_price:
             # Filtros de precio
@@ -245,16 +261,16 @@ def search_stocks_advanced(
                 continue
             if max_price is not None and current_price > max_price:
                 continue
-            
+
             # Calcular P&L
             pnl = OptionsCalculator.calculate_position_pnl(
                 stock.shares,
-                stock.adjusted_cost_basis,
+                response.adjusted_cost_basis,
                 current_price
             )
-            
+
             pnl_pct = pnl["unrealized_pnl_pct"]
-            
+
             # Filtros de P&L
             if min_pnl_pct is not None and pnl_pct < min_pnl_pct:
                 continue
@@ -264,18 +280,16 @@ def search_stocks_advanced(
                 continue
             if losing_only and pnl_pct >= 0:
                 continue
-            
-            response = StockResponse.from_orm(stock)
+
             response.current_price = current_price
             response.current_value = pnl["current_value"]
             response.unrealized_pnl = pnl["unrealized_pnl"]
             response.unrealized_pnl_pct = pnl_pct
-            
+
             results.append(response)
         else:
             # Sin precio, agregar sin filtros de precio/pnl
             if not (min_price or max_price or min_pnl_pct or max_pnl_pct or profitable_only or losing_only):
-                response = StockResponse.from_orm(stock)
                 results.append(response)
     
     # Ordenamiento

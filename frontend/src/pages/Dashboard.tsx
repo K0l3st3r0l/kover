@@ -14,12 +14,20 @@ interface DashboardSummary {
   total_invested: number
   total_capital_deployed: number
   current_portfolio_value: number
+  /** Prima realizada (ciclos cerrados). La de posiciones abiertas va aparte. */
   total_premium_earned: number
+  open_option_premium: number
+  option_commissions: number
+  total_premium_net_of_fees: number
+  dividends: number
+  commissions: number
+  ledger_status: 'RECONCILED' | 'REVIEW_REQUIRED'
   open_options: number
   realized_pnl: number
   realized_stock_pnl: number
   unrealized_pnl: number
   total_pnl: number
+  total_pnl_scope: string
   total_pnl_pct: number
   roi_historical_pct: number
   roi_current_pct: number
@@ -320,7 +328,19 @@ function Dashboard() {
 
       {/* Alertas de Expiración */}
       <ExpirationAlerts />
-      
+
+      {summary?.ledger_status === 'REVIEW_REQUIRED' && (
+        <div className="mb-6 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+            Las primas no cuadran con el libro de transacciones
+          </p>
+          <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+            Hay opciones sin transacciones que las respalden. Revisa el detalle en Ciclos de covered calls.
+          </p>
+        </div>
+      )}
+
+
       {/* Stats Grid */}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4 mb-6">
         <div className="bg-white dark:bg-gray-800 overflow-hidden shadow rounded-lg">
@@ -353,10 +373,16 @@ function Dashboard() {
           <div className="p-5">
             <div className="flex items-center">
               <div className="flex-1">
-                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">Primas Ganadas</dt>
+                <dt className="text-sm font-medium text-gray-500 dark:text-gray-400 truncate">Primas realizadas</dt>
                 <dd className="mt-1 text-3xl font-semibold text-green-600 dark:text-green-400">
-                  {formatCurrency(summary?.total_premium_earned)}
+                  {formatCurrency(summary?.total_premium_net_of_fees)}
                 </dd>
+                <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                  Ciclos cerrados, neto de {formatCurrency(summary?.option_commissions)} en comisiones
+                  {(summary?.open_option_premium ?? 0) !== 0 && (
+                    <> · {formatCurrency(summary?.open_option_premium)} en posiciones abiertas</>
+                  )}
+                </p>
               </div>
             </div>
           </div>
@@ -408,11 +434,11 @@ function Dashboard() {
 
         <div className="bg-white dark:bg-gray-800 overflow-hidden shadow rounded-lg p-5">
           <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">P&L Realizado</dt>
-          <dd className={`mt-1 text-2xl font-semibold ${((summary?.realized_pnl || 0) + (summary?.realized_stock_pnl || 0)) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-            {formatCurrency((summary?.realized_pnl || 0) + (summary?.realized_stock_pnl || 0))}
+          <dd className={`mt-1 text-2xl font-semibold ${((summary?.total_premium_net_of_fees || 0) + (summary?.realized_stock_pnl || 0)) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+            {formatCurrency((summary?.total_premium_net_of_fees || 0) + (summary?.realized_stock_pnl || 0))}
           </dd>
           <dd className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-            Opciones: {formatCurrency(summary?.realized_pnl)} · Acciones: {formatCurrency(summary?.realized_stock_pnl)}
+            Opciones: {formatCurrency(summary?.total_premium_net_of_fees)} · Acciones: {formatCurrency(summary?.realized_stock_pnl)}
           </dd>
         </div>
 
@@ -584,12 +610,15 @@ function Dashboard() {
             {/* Premiums */}
             <div className="mb-3 pb-3 border-b border-blue-200 dark:border-blue-700/50">
               <div className="flex justify-between items-baseline">
-                <span className="text-sm text-gray-600 dark:text-gray-300">Premiums netos (opciones)</span>
-                <span className={`text-base font-bold ${metrics.total_premium >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
-                  {metrics.total_premium >= 0 ? '+' : ''}{formatCurrency(metrics.total_premium)}
+                <span className="text-sm text-gray-600 dark:text-gray-300">Premiums realizados (opciones)</span>
+                <span className={`text-base font-bold ${metrics.closed_option_pnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                  {metrics.closed_option_pnl >= 0 ? '+' : ''}{formatCurrency(metrics.closed_option_pnl)}
                 </span>
               </div>
-              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Todas las posiciones, históricas y actuales</p>
+              <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                Solo ciclos cerrados. {formatCurrency(metrics.open_option_premium)} de posiciones abiertas queda fuera
+                hasta que se cierren.
+              </p>
             </div>
 
             {/* Realized stocks */}
@@ -603,12 +632,29 @@ function Dashboard() {
               <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">Ganancias/pérdidas de acciones vendidas</p>
             </div>
 
+            {/* Dividendos y costos */}
+            <div className="mb-4 pb-3 border-b border-blue-200 dark:border-blue-700/50 space-y-1">
+              <div className="flex justify-between items-baseline">
+                <span className="text-sm text-gray-600 dark:text-gray-300">Dividendos</span>
+                <span className="text-base font-bold text-green-600 dark:text-green-400">
+                  +{formatCurrency(metrics.dividends)}
+                </span>
+              </div>
+              <div className="flex justify-between items-baseline">
+                <span className="text-sm text-gray-600 dark:text-gray-300">Comisiones</span>
+                <span className="text-base font-bold text-red-500">
+                  -{formatCurrency(metrics.commissions)}
+                </span>
+              </div>
+              <p className="text-xs text-gray-400 dark:text-gray-500">Comisiones de acciones y opciones, cobradas una sola vez</p>
+            </div>
+
             {/* Net total */}
             <div className="bg-white dark:bg-gray-700 rounded-lg px-4 py-3 flex justify-between items-center">
               <div>
                 <p className="text-sm font-semibold text-gray-700 dark:text-gray-200">P&amp;L Neto Total</p>
                 <p className="text-xs text-gray-400 dark:text-gray-400">
-                  ROI sobre {formatCurrency(metrics.total_capital_deployed)} capital desplegado
+                  Ratio sobre {formatCurrency(metrics.total_capital_deployed)} de compras históricas; no es el retorno de la cartera
                 </p>
               </div>
               <div className="text-right">

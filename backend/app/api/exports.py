@@ -8,6 +8,7 @@ import csv
 from ..database import get_db
 from ..models import Stock, Option, Transaction, User, OptionStatus
 from ..utils.auth import get_current_user
+from ..services.premium_ledger import load_premium_by_ticker
 
 router = APIRouter()
 
@@ -78,10 +79,11 @@ async def export_stocks_csv(
     Exportar posiciones de stocks a CSV
     """
     stocks = db.query(Stock).filter(Stock.user_id == current_user.id).all()
-    
+    premiums = load_premium_by_ticker(db, current_user.id)
+
     output = StringIO()
     writer = csv.writer(output)
-    
+
     # Headers
     writer.writerow([
         'Ticker',
@@ -90,22 +92,33 @@ async def export_stocks_csv(
         'Average Cost',
         'Total Invested',
         'Adjusted Cost Basis',
-        'Total Premium Earned',
+        'Realized Premium (net of fees)',
+        'Open Premium',
+        'Option Commissions',
         'Active',
         'Created At',
         'Notes'
     ])
-    
+
     # Datos
     for stock in stocks:
+        bucket = premiums.get(stock.ticker, {})
+        premium_realized = bucket.get("realized", 0.0)
+        premium_commissions = bucket.get("commissions", 0.0)
+        premium_net = premium_realized - premium_commissions
+        adjusted_cost_basis = (
+            stock.average_cost - (premium_net / stock.shares) if stock.shares > 0 else stock.average_cost
+        )
         writer.writerow([
             stock.ticker,
             stock.company_name or '',
             stock.shares,
             f"{stock.average_cost:.2f}",
             f"{stock.total_invested:.2f}",
-            f"{stock.adjusted_cost_basis:.2f}",
-            f"{stock.total_premium_earned:.2f}",
+            f"{adjusted_cost_basis:.2f}",
+            f"{premium_net:.2f}",
+            f"{bucket.get('open', 0.0):.2f}",
+            f"{premium_commissions:.2f}",
             'Yes' if stock.is_active else 'No',
             stock.created_at.strftime('%Y-%m-%d') if stock.created_at else '',
             stock.notes or ''

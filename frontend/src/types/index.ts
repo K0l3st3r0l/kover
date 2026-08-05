@@ -32,12 +32,24 @@ export interface DashboardSummary {
   total_stocks: number;
   total_invested: number;
   current_portfolio_value: number;
+  /** Prima realizada (ciclos cerrados). No incluye la prima de posiciones abiertas. */
   total_premium_earned: number;
+  open_option_premium: number;
+  option_commissions: number;
+  total_premium_net_of_fees: number;
+  dividends: number;
+  commissions: number;
+  ledger_status: 'RECONCILED' | 'REVIEW_REQUIRED';
   open_options: number;
   realized_pnl: number;
+  realized_stock_pnl: number;
   unrealized_pnl: number;
   total_pnl: number;
+  /** Qué entra y qué no en `total_pnl`. */
+  total_pnl_scope: string;
   total_pnl_pct: number;
+  roi_historical_pct: number;
+  roi_current_pct: number;
 }
 
 export type TransactionType = 
@@ -107,12 +119,27 @@ export interface PerformanceMetrics {
   total_invested: number;
   total_capital_deployed: number;
   current_value: number;
+  /** Alias de `closed_option_pnl`: prima realizada, sin la de posiciones abiertas. */
   total_premium: number;
+  closed_option_pnl: number;
+  open_option_premium: number;
+  option_ledger_total: number;
+  transaction_option_net: number;
+  option_ledger_difference: number;
+  unmatched_transaction_count: number;
+  ambiguous_option_ids: number[];
+  ledger_status: 'RECONCILED' | 'REVIEW_REQUIRED';
   realized_stock_pnl: number;
+  dividends: number;
+  commissions: number;
+  realized_total_pnl: number;
+  total_return_pnl: number;
   unrealized_pnl: number;
   net_total_pnl: number;
   roi_unrealized: number;
   roi_net_total: number;
+  roi_net_total_is_portfolio_return: boolean;
+  roi_net_total_scope: string;
   // legacy
   total_pnl: number;
   roi: number;

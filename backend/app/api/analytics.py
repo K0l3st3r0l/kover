@@ -5,9 +5,19 @@ from typing import List
 from datetime import datetime, timedelta, date
 import math
 from ..database import get_db
-from ..models import Stock, Option, Transaction, TransactionType, User, OptionStatus, OptionStrategy
+from ..models import Stock, Option, Transaction, TransactionType, User, OptionStatus
 from ..utils.auth import get_current_user
 from ..market.market_data import MarketDataService
+from ..services.premium_ledger import OPTION_TRANSACTION_TYPES, load_option_ledger, load_premium_by_ticker
+from ..utils.portfolio_metrics import (
+    SELL_TYPES,
+    annualize_simple_premium,
+    build_option_transaction_ledger,
+    calculate_total_return_breakdown,
+    premium_by_ticker,
+    split_option_premium,
+    summarize_cycles,
+)
 
 router = APIRouter()
 
@@ -117,7 +127,6 @@ async def get_performance_metrics(
     from collections import defaultdict
 
     active_stocks = db.query(Stock).filter(Stock.user_id == current_user.id, Stock.is_active == True).all()
-    options = db.query(Option).join(Stock).filter(Stock.user_id == current_user.id).all()
 
     # ── Capital actualmente invertido y valor de mercado ──────────────────────
     total_invested = sum(stock.total_invested for stock in active_stocks)
@@ -126,51 +135,75 @@ async def get_performance_metrics(
         current_price = MarketDataService.get_current_price(stock.ticker)
         current_portfolio_value += (current_price * stock.shares) if current_price else stock.total_invested
 
-    # P&L no realizado: solo posiciones abiertas, sin premiums
+    # P&L no realizado: solo posiciones abiertas, sin primas de opciones
     unrealized_pnl = current_portfolio_value - total_invested
     roi_unrealized = (unrealized_pnl / total_invested * 100) if total_invested > 0 else 0
 
-    # ── Premiums netos históricos (todas las posiciones, cerradas y abiertas) ──
-    all_stocks = db.query(Stock).filter(Stock.user_id == current_user.id).all()
-    total_premium = sum(s.total_premium_earned or 0.0 for s in all_stocks)
-
-    # ── P&L realizado en acciones (ventas históricas con costo base histórico) ─
+    # ── Ledger de acciones, efectivo y costos ──────────────────────────────────
     all_txns = (
         db.query(Transaction)
-        .join(Stock)
-        .filter(
-            Stock.user_id == current_user.id,
-            Transaction.transaction_type.in_([TransactionType.BUY_STOCK, TransactionType.SELL_STOCK])
-        )
-        .order_by(Transaction.transaction_date)
+        .filter(Transaction.user_id == current_user.id)
+        .order_by(Transaction.transaction_date, Transaction.id)
         .all()
     )
+    stock_txns = [
+        tx for tx in all_txns
+        if tx.transaction_type in (TransactionType.BUY_STOCK, TransactionType.SELL_STOCK)
+    ]
     running_qty: dict = defaultdict(float)
     running_cost: dict = defaultdict(float)
     realized_stock_pnl = 0.0
     total_capital_deployed = 0.0
 
-    for txn in all_txns:
+    for txn in stock_txns:
         ticker = txn.ticker
         if txn.transaction_type == TransactionType.BUY_STOCK:
-            qty = txn.quantity or 0
-            cost = abs(txn.total_amount or 0)
+            qty = float(txn.quantity or 0)
+            cost = abs(float(txn.total_amount or 0))
             total_capital_deployed += cost
             running_cost[ticker] += cost
             running_qty[ticker] += qty
-        elif txn.transaction_type == TransactionType.SELL_STOCK:
-            qty = txn.quantity or 0
-            proceeds = abs(txn.total_amount or 0)
-            commission = abs(txn.commission or 0)
-            if running_qty[ticker] > 0:
-                avg_cost_per_share = running_cost[ticker] / running_qty[ticker]
-                cost_basis = avg_cost_per_share * qty
-                realized_stock_pnl += (proceeds - commission) - cost_basis
-                running_cost[ticker] -= avg_cost_per_share * qty
-                running_qty[ticker] -= qty
+        elif running_qty[ticker] > 0:
+            requested_qty = float(txn.quantity or 0)
+            qty = min(requested_qty, running_qty[ticker])
+            proceeds = abs(float(txn.total_amount or 0))
+            if requested_qty > 0 and qty < requested_qty:
+                proceeds *= qty / requested_qty
+            avg_cost_per_share = running_cost[ticker] / running_qty[ticker]
+            cost_basis = avg_cost_per_share * qty
+            realized_stock_pnl += proceeds - cost_basis
+            running_cost[ticker] = max(0.0, running_cost[ticker] - cost_basis)
+            running_qty[ticker] = max(0.0, running_qty[ticker] - qty)
 
-    # ── P&L total = no realizado + premiums + realizado acciones ─────────────
-    net_total_pnl = unrealized_pnl + total_premium + realized_stock_pnl
+    total_commissions = sum(abs(float(tx.commission or 0.0)) for tx in all_txns)
+    dividends = sum(
+        float(tx.total_amount or 0.0)
+        for tx in all_txns
+        if tx.transaction_type == TransactionType.DIVIDEND
+    )
+
+    # ── Ledger de opciones: cerrado y abierto no son la misma cosa ────────────
+    options, option_ledger = load_option_ledger(db, current_user.id, all_txns)
+    option_transactions = [tx for tx in all_txns if tx.transaction_type in OPTION_TRANSACTION_TYPES]
+    closed_option_pnl = sum(row["realized_net"] for row in option_ledger["options"])
+    open_option_premium = sum(row["open_net"] for row in option_ledger["options"])
+
+    transaction_option_net = sum(
+        abs(float(tx.total_amount or 0.0))
+        if tx.transaction_type.value in SELL_TYPES
+        else -abs(float(tx.total_amount or 0.0))
+        for tx in option_transactions
+    )
+    option_ledger_total = closed_option_pnl + open_option_premium
+    return_breakdown = calculate_total_return_breakdown(
+        stock_realized_pnl=realized_stock_pnl,
+        stock_unrealized_pnl=unrealized_pnl,
+        closed_option_pnl=closed_option_pnl,
+        open_option_premium=open_option_premium,
+        dividends=dividends,
+        commissions=total_commissions,
+    )
+    net_total_pnl = return_breakdown["mark_to_market_total_pnl"]
     roi_net_total = (net_total_pnl / total_capital_deployed * 100) if total_capital_deployed > 0 else 0
 
     # ── Mejor y peor posición (vs costo ajustado por premiums) ────────────────
@@ -206,12 +239,30 @@ async def get_performance_metrics(
         "current_value": round(current_portfolio_value, 2),
         # P&L desglosado
         "unrealized_pnl": round(unrealized_pnl, 2),
-        "total_premium": round(total_premium, 2),
+        "total_premium": round(closed_option_pnl, 2),
+        "closed_option_pnl": round(closed_option_pnl, 2),
+        "open_option_premium": round(open_option_premium, 2),
+        "option_ledger_total": round(option_ledger_total, 2),
+        "transaction_option_net": round(transaction_option_net, 2),
+        "option_ledger_difference": round(transaction_option_net - option_ledger_total, 2),
+        "unmatched_transaction_count": len(option_ledger["unmatched_transaction_ids"]),
+        "ambiguous_option_ids": option_ledger["ambiguous_option_ids"],
+        "ledger_status": "RECONCILED" if (
+            not option_ledger["unmatched_transaction_ids"]
+            and not option_ledger["ambiguous_option_ids"]
+            and abs(transaction_option_net - option_ledger_total) <= 0.01
+        ) else "REVIEW_REQUIRED",
         "realized_stock_pnl": round(realized_stock_pnl, 2),
+        "dividends": round(dividends, 2),
+        "commissions": round(total_commissions, 2),
+        "realized_total_pnl": return_breakdown["realized_total_pnl"],
+        "total_return_pnl": return_breakdown["mark_to_market_total_pnl"],
         "net_total_pnl": round(net_total_pnl, 2),
-        # ROI
+        # ROI: ratio descriptivo sobre compras históricas; no es TWR/MWR
         "roi_unrealized": round(roi_unrealized, 2),
         "roi_net_total": round(roi_net_total, 2),
+        "roi_net_total_is_portfolio_return": False,
+        "roi_net_total_scope": "mark_to_market_excludes_open_option_fair_value_over_historical_stock_buys",
         # legacy (used by old frontend code)
         "total_pnl": round(net_total_pnl, 2),
         "roi": round(roi_unrealized, 2),
@@ -234,6 +285,7 @@ async def get_positions_pnl(
     active_stocks = db.query(Stock).filter(
         Stock.user_id == current_user.id, Stock.is_active == True
     ).all()
+    premiums = load_premium_by_ticker(db, current_user.id)
 
     positions = []
     for stock in active_stocks:
@@ -247,25 +299,36 @@ async def get_positions_pnl(
         unrealized_pct = ((current_price - avg_cost_raw) / avg_cost_raw * 100) \
             if avg_cost_raw > 0 else 0
 
-        # Premium ganado para este ticker
-        premium = stock.total_premium_earned or 0.0
+        # Prima del ticker según el ledger canónico, separando lo realizado de lo
+        # que todavía depende de una posición abierta.
+        bucket = premiums.get(stock.ticker, {})
+        premium_realized = bucket.get("realized", 0.0)
+        premium_open = bucket.get("open", 0.0)
+        premium_commissions = bucket.get("commissions", 0.0)
+        premium = round(premium_realized - premium_commissions, 2)
 
-        # P&L total = unrealized puro + premium neto cobrado
+        # P&L total = unrealized puro + prima realizada neta de comisiones
         total_pnl = unrealized_pnl + premium
         # ROI total = P&L total / capital bruto invertido (sin descontar premiums)
         total_pct = (total_pnl / stock.total_invested * 100) if stock.total_invested > 0 else 0
+        # Cost basis ajustado derivado del ledger, no del campo acumulado en BD.
+        adjusted_cost_basis = round(avg_cost_raw - (premium / stock.shares), 4) if stock.shares > 0 else 0
 
         positions.append({
             "ticker": stock.ticker,
             "shares": stock.shares,
             "cost_basis_raw": round(stock.total_invested / max(stock.shares, 1), 4),  # precio compra promedio bruto
-            "adjusted_cost_basis": round(stock.adjusted_cost_basis or 0, 4),           # ajustado por premiums
+            "adjusted_cost_basis": adjusted_cost_basis,                                # ajustado por primas realizadas
+            "stored_adjusted_cost_basis": round(stock.adjusted_cost_basis or 0, 4),    # legacy, campo de BD
             "current_price": round(current_price, 4),
             "current_value": round(current_price * stock.shares, 2),
             "total_invested": round(stock.total_invested, 2),
             "unrealized_pnl": round(unrealized_pnl, 2),
             "unrealized_pct": round(unrealized_pct, 2),
-            "premium_earned": round(premium, 2),
+            "premium_earned": premium,
+            "premium_realized": premium_realized,
+            "premium_open": premium_open,
+            "premium_commissions": premium_commissions,
             "total_pnl": round(total_pnl, 2),
             "total_pct": round(total_pct, 2),
         })
@@ -696,25 +759,47 @@ async def get_covered_call_cycles(
     Historial de ciclos de covered calls con rendimiento anualizado por prima.
     Captura cada ciclo (apertura → cierre/roll) y calcula su rentabilidad anualizada.
     """
-    options = db.query(Option).join(Stock).filter(
-        Stock.user_id == current_user.id,
-    ).order_by(Option.opened_at.asc()).all()
+    option_transactions = db.query(Transaction).filter(
+        Transaction.user_id == current_user.id,
+        Transaction.transaction_type.in_(OPTION_TRANSACTION_TYPES),
+    ).order_by(Transaction.transaction_date, Transaction.id).all()
+    options, option_ledger = load_option_ledger(db, current_user.id, option_transactions)
+    ledger_by_option_id = {row["option_id"]: row for row in option_ledger["options"]}
 
     cycles = []
     for idx, opt in enumerate(options, start=1):
-        capital = opt.strike_price * opt.contracts * 100
+        closing_cost = 0.0 if opt.status == OptionStatus.OPEN else round((opt.closing_premium or 0.0) * opt.contracts * 100, 2)
+        raw_realized_net, raw_open_net = split_option_premium(
+            status=opt.status,
+            total_premium=opt.total_premium,
+            closing_cost=closing_cost,
+            realized_pnl=opt.realized_pnl,
+        )
+        ledger_row = ledger_by_option_id.get(opt.id)
+        if ledger_row and ledger_row["matched"]:
+            realized_net_premium = ledger_row["realized_net"]
+            open_net_premium = ledger_row["open_net"]
+        else:
+            realized_net_premium = raw_realized_net
+            open_net_premium = raw_open_net
+        premium_source = ledger_row["premium_source"] if ledger_row else "OPTION_ROW_FALLBACK"
+        commissions = ledger_row["commissions"] if ledger_row else 0.0
+        net_premium = round(realized_net_premium + open_net_premium, 2)
+        net_premium_after_fees = round(net_premium - commissions, 2)
+
+        # El denominador tiene que cubrir el mismo tamaño que el numerador: tras
+        # un cierre parcial la fila baja de contratos pero el ledger sigue
+        # cubriendo los originales.
+        effective_contracts = ledger_row["contracts"] if ledger_row else opt.contracts
+        capital = opt.strike_price * effective_contracts * 100
 
         if opt.status == OptionStatus.OPEN:
-            closing_cost = 0.0
-            net_premium = opt.total_premium
             opened_date = opt.opened_at.date() if hasattr(opt.opened_at, 'date') else opt.opened_at
             exp_date = opt.expiration_date.date() if hasattr(opt.expiration_date, 'date') else opt.expiration_date
             duration_days = max(1, (exp_date - opened_date).days)
             end_date_str = exp_date.isoformat()
             label = f"Ciclo {idx} ★"
         else:
-            closing_cost = round((opt.closing_premium or 0.0) * opt.contracts * 100, 2)
-            net_premium = opt.total_premium - closing_cost
             opened_date = opt.opened_at.date() if hasattr(opt.opened_at, 'date') else opt.opened_at
             if opt.closed_at:
                 end_date = opt.closed_at.date() if hasattr(opt.closed_at, 'date') else opt.closed_at
@@ -724,8 +809,8 @@ async def get_covered_call_cycles(
             end_date_str = end_date.isoformat()
             label = f"Ciclo {idx}"
 
-        net_yield = (net_premium / capital * 100) if capital > 0 else 0
-        annualized = round(net_yield * (365 / duration_days), 2)
+        net_yield = (net_premium_after_fees / capital * 100) if capital > 0 else 0
+        annualized = annualize_simple_premium(net_premium_after_fees, capital, duration_days)
 
         cycles.append({
             "cycle_num": idx,
@@ -735,14 +820,24 @@ async def get_covered_call_cycles(
             "end_date": end_date_str,
             "expiration_date": opt.expiration_date.date().isoformat() if hasattr(opt.expiration_date, 'date') else str(opt.expiration_date),
             "strike_price": opt.strike_price,
-            "contracts": opt.contracts,
+            "contracts": effective_contracts,
+            "row_contracts": opt.contracts,
             "capital": round(capital, 2),
             "total_premium": round(opt.total_premium, 2),
             "closing_cost": round(closing_cost, 2),
             "net_premium": round(net_premium, 2),
+            "commissions": round(commissions, 2),
+            "net_premium_net_of_fees": net_premium_after_fees,
+            "raw_option_net_premium": round(raw_realized_net + raw_open_net, 2),
+            "premium_source": premium_source,
+            "realized_net_premium": round(realized_net_premium, 2),
+            "open_net_premium": round(open_net_premium, 2),
+            "premium_state": "OPEN" if opt.status == OptionStatus.OPEN else "REALIZED",
             "duration_days": duration_days,
             "net_yield": round(net_yield, 4),
+            "net_yield_gross": round((net_premium / capital * 100) if capital > 0 else 0, 4),
             "annualized_return": annualized,
+            "annualized_return_gross": annualize_simple_premium(net_premium, capital, duration_days),
             "status": opt.status.value,
             "notes": opt.notes or "",
             "option_type": opt.option_type.value,
@@ -776,14 +871,20 @@ async def get_covered_call_cycles(
         last  = gc[-1]
         is_open = any(c["status"] == "OPEN" for c in gc)
         total_net = round(sum(c["net_premium"] for c in gc), 2)
-        base_capital = first["capital"]
+        realized_net = round(sum(c["realized_net_premium"] for c in gc), 2)
+        open_net = round(sum(c["open_net_premium"] for c in gc), 2)
+        group_commissions = round(sum(c["commissions"] for c in gc), 2)
+        total_net_after_fees = round(total_net - group_commissions, 2)
+        # El capital base de la cadena es el mayor colateral comprometido, no el
+        # del primer tramo: un roll puede subir de contratos a mitad de camino.
+        base_capital = max(c["capital"] for c in gc)
         first_opened = first["opened_at"]
         last_end = last["end_date"]
         total_days = max(1, (
             datetime.fromisoformat(last_end) - datetime.fromisoformat(first_opened)
         ).days)
-        net_yield = round(total_net / base_capital * 100, 4) if base_capital > 0 else 0
-        annualized = round(net_yield * 365 / total_days, 2)
+        net_yield = round(total_net_after_fees / base_capital * 100, 4) if base_capital > 0 else 0
+        annualized = annualize_simple_premium(total_net_after_fees, base_capital, total_days)
         roll_groups.append({
             "group_id": gid,
             "ticker": first["ticker"],
@@ -795,6 +896,10 @@ async def get_covered_call_cycles(
             "total_days": total_days,
             "base_capital": base_capital,
             "total_net_premium": total_net,
+            "commissions": group_commissions,
+            "total_net_premium_net_of_fees": total_net_after_fees,
+            "closed_net_premium": realized_net,
+            "open_net_premium": open_net,
             "net_yield": net_yield,
             "annualized_return": annualized,
             "n_rolls": len(gc) - 1,
@@ -802,39 +907,32 @@ async def get_covered_call_cycles(
             "last_expiration": last["expiration_date"],
         })
 
-    if cycles:
-        closed_cycles = [c for c in cycles if c["status"] != "OPEN"]
-        open_cycles_list = [c for c in cycles if c["status"] == "OPEN"]
-        all_annualized = [c["annualized_return"] for c in cycles]
-        closed_annualized = [c["annualized_return"] for c in closed_cycles]
-        total_net_premium = sum(c["net_premium"] for c in cycles)
-        avg_annualized = round(sum(all_annualized) / len(all_annualized), 2)
-        avg_closed = round(sum(closed_annualized) / len(closed_annualized), 2) if closed_annualized else 0
-        capital_deployed = round(sum(c["capital"] for c in open_cycles_list), 2)
-        open_rg = [rg for rg in roll_groups if rg["status"] == "OPEN"]
-        summary = {
-            "total_cycles": len(cycles),
-            "closed_cycles": len(closed_cycles),
-            "avg_annualized_return": avg_annualized,
-            "avg_closed_annualized": avg_closed,
-            "total_net_premium": round(total_net_premium, 2),
-            "capital_deployed": capital_deployed,
-            "open_cycles": [
-                {"ticker": c["ticker"], "annualized": c["annualized_return"], "capital": c["capital"]}
-                for c in open_cycles_list
-            ],
-            "current_cycle_annualized": open_cycles_list[-1]["annualized_return"] if open_cycles_list else None,
-        }
-    else:
-        summary = {
-            "total_cycles": 0,
-            "closed_cycles": 0,
-            "avg_annualized_return": 0,
-            "avg_closed_annualized": 0,
-            "total_net_premium": 0,
-            "capital_deployed": 0,
-            "current_cycle_annualized": None,
-        }
+    transaction_net_premium = sum(
+        abs(tx.total_amount or 0.0) if tx.transaction_type.value in SELL_TYPES else -abs(tx.total_amount or 0.0)
+        for tx in option_transactions
+    )
+    transaction_commissions = sum(abs(tx.commission or 0.0) for tx in option_transactions)
+    raw_option_net_premium = sum(c["raw_option_net_premium"] for c in cycles)
+    unmatched_transaction_ids = option_ledger["unmatched_transaction_ids"]
+    ambiguous_option_ids = option_ledger["ambiguous_option_ids"]
+
+    summary = summarize_cycles(cycles)
+    summary.update({
+        "transaction_net_premium": round(transaction_net_premium, 2),
+        "transaction_commissions": round(transaction_commissions, 2),
+        "option_row_net_premium": round(raw_option_net_premium, 2),
+        "option_row_difference": round(raw_option_net_premium - transaction_net_premium, 2),
+        "ledger_difference": round(transaction_net_premium - summary["total_net_premium"], 2),
+        "unmatched_transaction_count": len(unmatched_transaction_ids),
+        "unmatched_transaction_ids": unmatched_transaction_ids,
+        "ambiguous_option_ids": ambiguous_option_ids,
+        "ledger_status": "RECONCILED" if (
+            not unmatched_transaction_ids
+            and not ambiguous_option_ids
+            and abs(transaction_net_premium - summary["total_net_premium"]) <= 0.01
+        ) else "REVIEW_REQUIRED",
+        "canonical_premium_source": "TRANSACTIONS_EXACT_WITH_OPTION_FALLBACK_IF_UNMATCHED",
+    })
 
     return {"cycles": cycles, "summary": summary, "roll_groups": roll_groups}
 

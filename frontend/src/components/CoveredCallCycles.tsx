@@ -15,13 +15,23 @@ interface Cycle {
   expiration_date: string
   strike_price: number
   contracts: number
+  row_contracts: number
   capital: number
   total_premium: number
   closing_cost: number
   net_premium: number
+  commissions: number
+  net_premium_net_of_fees: number
+  raw_option_net_premium: number
+  premium_source: 'TRANSACTIONS_EXACT' | 'OPTION_ROW_FALLBACK' | 'OPTION_ROW_AMBIGUOUS'
+  realized_net_premium: number
+  open_net_premium: number
+  premium_state: 'OPEN' | 'REALIZED'
   duration_days: number
   net_yield: number
+  net_yield_gross: number
   annualized_return: number
+  annualized_return_gross: number
   status: 'OPEN' | 'CLOSED' | 'EXPIRED' | 'ASSIGNED'
   notes: string
   is_roll: boolean
@@ -41,6 +51,10 @@ interface RollGroup {
   total_days: number
   base_capital: number
   total_net_premium: number
+  commissions: number
+  total_net_premium_net_of_fees: number
+  closed_net_premium: number
+  open_net_premium: number
   net_yield: number
   annualized_return: number
   n_rolls: number
@@ -59,10 +73,31 @@ interface CycleSummary {
   closed_cycles: number
   avg_annualized_return: number
   avg_closed_annualized: number
+  avg_closed_annualized_gross: number
+  closed_net_premium: number
+  open_net_premium: number
   total_net_premium: number
+  closed_commissions: number
+  open_commissions: number
+  total_commissions: number
+  closed_net_premium_after_fees: number
+  total_net_premium_after_fees: number
+  closed_positive_cycles: number
+  closed_negative_cycles: number
+  closed_win_rate: number
   capital_deployed: number
   open_cycles: OpenCycleSummary[]
   current_cycle_annualized: number | null
+  annualized_metric: string
+  annualized_is_portfolio_return: boolean
+  transaction_net_premium: number
+  option_row_net_premium: number
+  option_row_difference: number
+  ledger_difference: number
+  unmatched_transaction_count: number
+  unmatched_transaction_ids: number[]
+  ambiguous_option_ids: number[]
+  ledger_status: 'RECONCILED' | 'REVIEW_REQUIRED'
 }
 
 interface CyclesData {
@@ -173,7 +208,7 @@ function CoveredCallCycles() {
         {matchRg && (
           <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-600 text-xs text-gray-500 space-y-0.5">
             {matchRg.is_roll_chain && <p className="text-amber-500 font-medium">🔄 Cadena de {matchRg.n_rolls + 1} ciclos ({matchRg.n_rolls} roll{matchRg.n_rolls > 1 ? 's' : ''})</p>}
-            <p>Prima neta: {fmt(matchRg.total_net_premium)} · {matchRg.total_days}d</p>
+            <p>Prima neta: {fmt(matchRg.total_net_premium_net_of_fees)} · {matchRg.total_days}d</p>
             <p>Capital base: {fmt(matchRg.base_capital)}</p>
           </div>
         )}
@@ -183,6 +218,23 @@ function CoveredCallCycles() {
 
   return (
     <div>
+      {summary.ledger_status === 'REVIEW_REQUIRED' && (
+        <div className="mb-4 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+            Las primas no cuadran con el libro de transacciones
+          </p>
+          <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+            {summary.unmatched_transaction_count > 0 && (
+              <>{summary.unmatched_transaction_count} transacción(es) sin ciclo asociado. </>
+            )}
+            {summary.ambiguous_option_ids.length > 0 && (
+              <>{summary.ambiguous_option_ids.length} ciclo(s) sin transacciones propias, calculados desde la fila de la opción. </>
+            )}
+            Diferencia contra el libro: {fmt(summary.ledger_difference)}. Los ciclos marcados con ⚠ usan la fuente menos confiable.
+          </p>
+        </div>
+      )}
+
       {/* Stat cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
         <div className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-900/20 dark:to-green-800/20 rounded-lg p-4 border border-green-200 dark:border-green-800">
@@ -212,15 +264,26 @@ function CoveredCallCycles() {
           <p className="text-2xl font-bold text-blue-900 dark:text-blue-100">
             {fmtPct(summary.avg_closed_annualized)}
           </p>
-          <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">{summary.closed_cycles} ciclo(s) cerrado(s)</p>
+          <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+            {summary.closed_cycles} ciclo(s) · bruto {fmtPct(summary.avg_closed_annualized_gross)}
+          </p>
+          <p className="text-[11px] text-blue-500/80 dark:text-blue-400/70 mt-1 leading-tight">
+            Promedio simple de anualizaciones por ciclo sobre strike × contratos × 100, neto de comisiones.
+            No es el retorno de la cartera.
+          </p>
         </div>
 
         <div className="bg-white dark:bg-gray-700 rounded-lg p-4 border border-gray-200 dark:border-gray-600">
           <p className="text-xs text-gray-500 dark:text-gray-400 font-medium mb-1">Prima neta total</p>
           <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">
-            {fmt(summary.total_net_premium)}
+            {fmt(summary.total_net_premium_after_fees)}
           </p>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Ingreso acumulado</p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            Cerrada {fmt(summary.closed_net_premium)} · abierta {fmt(summary.open_net_premium)}
+          </p>
+          <p className="text-[11px] text-gray-400 dark:text-gray-500 mt-1">
+            Menos {fmt(summary.total_commissions)} de comisiones
+          </p>
         </div>
 
         <div className="bg-white dark:bg-gray-700 rounded-lg p-4 border border-gray-200 dark:border-gray-600">
@@ -330,6 +393,7 @@ function CoveredCallCycles() {
               <th className="pb-2 pr-3 text-right">Días</th>
               <th className="pb-2 pr-3 text-right">Capital</th>
               <th className="pb-2 pr-3 text-right">Prima neta</th>
+              <th className="pb-2 pr-3 text-right">Comisión</th>
               <th className="pb-2 pr-3 text-right">Yield</th>
               <th className="pb-2 text-right">Anualizado</th>
             </tr>
@@ -373,13 +437,36 @@ function CoveredCallCycles() {
                           {c.end_date}{c.status === 'OPEN' && <span className="ml-1 text-green-600">(exp.)</span>}
                         </td>
                         <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400 text-xs">{c.duration_days}d</td>
-                        <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400 text-xs">{fmt(c.capital)}</td>
-                        <td className={`py-2 pr-3 text-right text-xs font-medium ${c.net_premium >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
-                          {fmt(c.net_premium)}
+                        <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400 text-xs">
+                          {fmt(c.capital)}
+                          {c.row_contracts !== c.contracts && (
+                            <span
+                              className="ml-1 text-amber-500"
+                              title={`Cerrado en tramos: ${c.contracts} contrato(s) originales, ${c.row_contracts} en la fila`}
+                            >
+                              ◧
+                            </span>
+                          )}
+                        </td>
+                        <td className={`py-2 pr-3 text-right text-xs font-medium ${c.net_premium_net_of_fees >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                          {fmt(c.net_premium_net_of_fees)}
+                          {c.premium_source !== 'TRANSACTIONS_EXACT' && (
+                            <span
+                              className="ml-1 text-amber-500"
+                              title={c.premium_source === 'OPTION_ROW_AMBIGUOUS'
+                                ? 'Sin transacciones propias: otro ciclo de la misma terna se las llevó'
+                                : 'Calculado desde la fila de la opción, sin transacciones que lo respalden'}
+                            >
+                              ⚠
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pr-3 text-right text-gray-500 dark:text-gray-400 text-xs">
+                          {c.commissions > 0 ? fmt(-c.commissions) : '—'}
                         </td>
                         <td className="py-2 pr-3 text-right text-gray-500 dark:text-gray-400 text-xs">{c.net_yield.toFixed(3)}%</td>
                         <td className="py-2 text-right text-xs">
-                          <span className={c.annualized_return >= summary.avg_annualized_return ? 'text-gray-500' : 'text-gray-500'}>
+                          <span className="text-gray-500" title={`Bruto de comisiones: ${fmtPct(c.annualized_return_gross)}`}>
                             {fmtPct(c.annualized_return)}
                           </span>
                         </td>
@@ -403,8 +490,11 @@ function CoveredCallCycles() {
                     </td>
                     <td className="py-2 pr-3 text-right text-xs font-semibold text-gray-700 dark:text-gray-300">{rg.total_days}d</td>
                     <td className="py-2 pr-3 text-right text-xs text-gray-600 dark:text-gray-400">{fmt(rg.base_capital)}</td>
-                    <td className={`py-2 pr-3 text-right text-sm font-bold ${rg.total_net_premium >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
-                      {fmt(rg.total_net_premium)}
+                    <td className={`py-2 pr-3 text-right text-sm font-bold ${rg.total_net_premium_net_of_fees >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                      {fmt(rg.total_net_premium_net_of_fees)}
+                    </td>
+                    <td className="py-2 pr-3 text-right text-xs text-gray-500 dark:text-gray-400">
+                      {rg.commissions > 0 ? fmt(-rg.commissions) : '—'}
                     </td>
                     <td className="py-2 pr-3 text-right text-xs font-semibold text-gray-700 dark:text-gray-300">{rg.net_yield.toFixed(3)}%</td>
                     <td className="py-2 text-right">

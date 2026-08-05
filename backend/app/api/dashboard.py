@@ -7,6 +7,8 @@ from ..models.user import User
 from ..utils.auth import get_current_user
 from ..market import MarketDataService
 from ..utils import OptionsCalculator
+from ..services.premium_ledger import load_option_ledger, load_premium_by_ticker
+from ..utils.portfolio_metrics import calculate_total_return_breakdown
 
 router = APIRouter()
 
@@ -53,44 +55,59 @@ def get_dashboard_summary(
     # P&L realizado de ventas de acciones usando costo promedio histórico
     from collections import defaultdict
     all_txs_ordered = db.query(Transaction).filter(
-        Transaction.user_id == current_user.id,
-        Transaction.transaction_type.in_([TransactionType.BUY_STOCK, TransactionType.SELL_STOCK])
-    ).order_by(Transaction.transaction_date).all()
+        Transaction.user_id == current_user.id
+    ).order_by(Transaction.transaction_date, Transaction.id).all()
+    stock_txs = [
+        tx for tx in all_txs_ordered
+        if tx.transaction_type in (TransactionType.BUY_STOCK, TransactionType.SELL_STOCK)
+    ]
     _running_shares: dict = defaultdict(float)
     _running_cost: dict = defaultdict(float)
-    _sell_avg_cost: dict = {}
-    for _tx in all_txs_ordered:
-        if _tx.transaction_type == TransactionType.BUY_STOCK:
-            _running_shares[_tx.ticker] += _tx.quantity
-            _running_cost[_tx.ticker] += _tx.total_amount
-        elif _tx.transaction_type == TransactionType.SELL_STOCK:
-            _shares = _running_shares[_tx.ticker]
-            _avg = (_running_cost[_tx.ticker] / _shares) if _shares > 0 else 0.0
-            _sell_avg_cost[_tx.id] = _avg
-            _running_shares[_tx.ticker] = max(0.0, _running_shares[_tx.ticker] - _tx.quantity)
-            _running_cost[_tx.ticker] = max(0.0, _running_cost[_tx.ticker] - _tx.quantity * _avg)
-    realized_stock_pnl = sum(
-        tx.total_amount - tx.quantity * _sell_avg_cost.get(tx.id, 0.0)
+    realized_stock_pnl = 0.0
+    total_capital_deployed = 0.0
+    for tx in stock_txs:
+        if tx.transaction_type == TransactionType.BUY_STOCK:
+            qty = float(tx.quantity or 0)
+            total_amount = abs(float(tx.total_amount or 0))
+            _running_shares[tx.ticker] += qty
+            _running_cost[tx.ticker] += total_amount
+            total_capital_deployed += total_amount
+        elif _running_shares[tx.ticker] > 0:
+            requested_qty = float(tx.quantity or 0)
+            qty = min(requested_qty, _running_shares[tx.ticker])
+            proceeds = abs(float(tx.total_amount or 0))
+            if requested_qty > 0 and qty < requested_qty:
+                proceeds *= qty / requested_qty
+            avg = _running_cost[tx.ticker] / _running_shares[tx.ticker]
+            cost_basis = avg * qty
+            realized_stock_pnl += proceeds - cost_basis
+            _running_shares[tx.ticker] = max(0.0, _running_shares[tx.ticker] - qty)
+            _running_cost[tx.ticker] = max(0.0, _running_cost[tx.ticker] - cost_basis)
+
+    total_commissions = sum(abs(float(tx.commission or 0.0)) for tx in all_txs_ordered)
+    dividends = sum(
+        float(tx.total_amount or 0.0)
         for tx in all_txs_ordered
-        if tx.transaction_type == TransactionType.SELL_STOCK
+        if tx.transaction_type == TransactionType.DIVIDEND
     )
 
-    # Capital total desplegado históricamente (suma de todos los BUY_STOCK)
-    total_capital_deployed = sum(
-        tx.total_amount for tx in all_txs_ordered
-        if tx.transaction_type == TransactionType.BUY_STOCK
+    _, option_ledger = load_option_ledger(db, current_user.id, all_txs_ordered)
+    closed_option_pnl = sum(row["realized_net"] for row in option_ledger["options"])
+    open_option_premium = sum(row["open_net"] for row in option_ledger["options"])
+    option_commissions = round(sum(row["commissions"] for row in option_ledger["options"]), 2)
+
+    return_breakdown = calculate_total_return_breakdown(
+        stock_realized_pnl=realized_stock_pnl,
+        stock_unrealized_pnl=total_unrealized_pnl,
+        closed_option_pnl=closed_option_pnl,
+        open_option_premium=open_option_premium,
+        dividends=dividends,
+        commissions=total_commissions,
     )
+    total_premium_earned = closed_option_pnl
+    total_pnl = return_breakdown["mark_to_market_total_pnl"]
 
-    # P&L realizado de opciones: usamos total_premium_earned del modelo Stock
-    # (neto de todas las primas cobradas - buybacks, open + closed)
-    # Incluimos TODOS los stocks (activos e inactivos) para capturar primas históricas
-    all_stocks = db.query(Stock).filter(Stock.user_id == current_user.id).all()
-    total_premium_earned = sum(s.total_premium_earned or 0.0 for s in all_stocks)  # net options P&L
-
-    # P&L total = precio puro + todas las primas netas + realizado acciones
-    total_pnl = total_unrealized_pnl + total_premium_earned + realized_stock_pnl
-
-    # ROI histórico: P&L total / capital históricamente desplegado
+    # ROI histórico: ratio descriptivo sobre compras; no es TWR/MWR.
     roi_historical_pct = (total_pnl / total_capital_deployed * 100) if total_capital_deployed > 0 else 0
 
     # ROI actual: P&L precio puro / capital activo invertido
@@ -105,11 +122,21 @@ def get_dashboard_summary(
         "total_capital_deployed": round(total_capital_deployed, 2),
         "current_portfolio_value": round(current_portfolio_value, 2),
         "total_premium_earned": round(total_premium_earned, 2),
+        "open_option_premium": round(open_option_premium, 2),
+        "option_commissions": option_commissions,
+        "total_premium_net_of_fees": round(total_premium_earned - option_commissions, 2),
+        "dividends": round(dividends, 2),
+        "commissions": round(total_commissions, 2),
         "open_options": open_options,
-        "realized_pnl": round(total_premium_earned, 2),  # alias: net option premiums
+        "ledger_status": "RECONCILED" if (
+            not option_ledger["unmatched_transaction_ids"]
+            and not option_ledger["ambiguous_option_ids"]
+        ) else "REVIEW_REQUIRED",
+        "realized_pnl": round(total_premium_earned, 2),  # compat: primas netas cerradas
         "realized_stock_pnl": round(realized_stock_pnl, 2),
         "unrealized_pnl": round(total_unrealized_pnl, 2),
         "total_pnl": round(total_pnl, 2),
+        "total_pnl_scope": "mark_to_market_excludes_open_option_fair_value_over_historical_stock_buys",
         "total_pnl_pct": round(total_pnl_pct, 2),
         "roi_historical_pct": round(roi_historical_pct, 2),
         "roi_current_pct": round(roi_current_pct, 2),
@@ -125,27 +152,39 @@ def get_positions_overview(
     stocks = db.query(Stock).filter(Stock.user_id == current_user.id, Stock.is_active == True).all()
     tickers = [s.ticker for s in stocks]
     prices = MarketDataService.get_multiple_prices(tickers) if tickers else {}
-    
+    premiums = load_premium_by_ticker(db, current_user.id)
+
     positions = []
     for stock in stocks:
         current_price = prices.get(stock.ticker)
-        
+
+        bucket = premiums.get(stock.ticker, {})
+        premium_realized = bucket.get("realized", 0.0)
+        premium_net = round(premium_realized - bucket.get("commissions", 0.0), 2)
+        adjusted_cost_basis = round(
+            stock.average_cost - (premium_net / stock.shares), 4
+        ) if stock.shares > 0 else stock.average_cost
+
         position_data = {
             "id": stock.id,
             "ticker": stock.ticker,
             "company_name": stock.company_name,
             "shares": stock.shares,
             "average_cost": stock.average_cost,
-            "adjusted_cost_basis": stock.adjusted_cost_basis,
+            "adjusted_cost_basis": adjusted_cost_basis,
+            "stored_adjusted_cost_basis": stock.adjusted_cost_basis,
             "total_invested": stock.total_invested,
-            "total_premium_earned": stock.total_premium_earned,
+            "total_premium_earned": premium_net,
+            "premium_realized": premium_realized,
+            "premium_open": bucket.get("open", 0.0),
+            "premium_commissions": bucket.get("commissions", 0.0),
             "current_price": current_price,
         }
-        
+
         if current_price:
             pnl = OptionsCalculator.calculate_position_pnl(
                 stock.shares,
-                stock.adjusted_cost_basis,
+                adjusted_cost_basis,
                 current_price
             )
             position_data.update(pnl)
