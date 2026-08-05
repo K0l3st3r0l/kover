@@ -1,8 +1,12 @@
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, EmailStr
 from ..database import get_db
 from ..models.user import User
+from ..services.cash_ledger import compute_cash_balance
 from ..utils.auth import create_access_token, get_current_user
 
 router = APIRouter()
@@ -47,16 +51,27 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     }
 
 class CashBalanceUpdate(BaseModel):
-    cash_balance: float
+    """Fija el ancla del saldo derivado: cuánto había y desde cuándo contar."""
+    cash_balance: float                      # saldo conocido a `opening_date`
+    opening_date: Optional[datetime] = None  # sin fecha, cuenta todo el historial
+
 
 @router.get("/cash")
 def get_cash_balance(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Retorna el saldo de cash disponible del usuario"""
+    """
+    Saldo de caja derivado de las transacciones, con su desglose.
+
+    `cash_balance` sigue en la respuesta con el mismo nombre para no romper a los
+    consumidores; lo que cambió es que ya no es un número escrito a mano.
+    """
     user = db.query(User).filter(User.id == current_user.id).first()
-    return {"cash_balance": user.cash_balance or 0.0}
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    return compute_cash_balance(db, user)
+
 
 @router.put("/cash")
 def update_cash_balance(
@@ -64,14 +79,22 @@ def update_cash_balance(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Actualiza el saldo de cash disponible del usuario"""
+    """
+    Fija el saldo inicial desde el que se derivan los flujos.
+
+    El valor que se manda es el saldo **a esa fecha**, no el saldo actual: los
+    movimientos posteriores se suman encima. Para IB, el "Starting Cash" del
+    Cash Report en la fecha de inicio del extracto.
+    """
     user = db.query(User).filter(User.id == current_user.id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    user.cash_balance = data.cash_balance
+
+    user.cash_opening_balance = data.cash_balance
+    user.cash_opening_date = data.opening_date
     db.commit()
     db.refresh(user)
-    return {"cash_balance": user.cash_balance}
+    return compute_cash_balance(db, user)
 
 @router.get("/me")
 def get_me(current_user: User = Depends(get_current_user)):

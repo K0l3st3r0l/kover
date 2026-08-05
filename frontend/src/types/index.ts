@@ -63,7 +63,21 @@ export type TransactionType =
   | 'DIVIDEND'
   | 'OPTION_EXPIRY'
   | 'DEPOSIT'
-  | 'WITHDRAWAL';
+  | 'WITHDRAWAL'
+  | 'FEE'
+  | 'WITHHOLDING_TAX';
+
+/** Saldo de caja derivado de las transacciones sobre un saldo inicial (ancla). */
+export interface CashInfo {
+  cash_balance: number;
+  opening_balance: number;
+  opening_date: string | null;
+  inflows: number;
+  outflows: number;
+  commissions: number;
+  transactions_counted: number;
+  is_derived: boolean;
+}
 
 export interface Transaction {
   id: number;

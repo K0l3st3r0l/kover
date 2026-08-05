@@ -245,10 +245,13 @@ async def get_fiscal_report(
     opciones_cerradas = []     # BUY_CALL, BUY_PUT    → gasto (cierre de posición larga)
     dividendos = []            # DIVIDEND
     asignaciones = []          # ASSIGNMENT
+    retenciones = []           # WITHHOLDING_TAX → crédito Art.41A
 
     for t in transactions:
         tt = t.transaction_type
-        if tt == TransactionType.SELL_STOCK:
+        if tt == TransactionType.WITHHOLDING_TAX:
+            retenciones.append(t)
+        elif tt == TransactionType.SELL_STOCK:
             ventas_acciones.append(t)
         elif tt == TransactionType.BUY_STOCK:
             compras_acciones.append(t)
@@ -330,7 +333,13 @@ async def get_fiscal_report(
     #    Si no lo has presentado, IB sigue reteniendo el 30% por defecto.
     #
     # En cualquier caso, la retención pagada (ya sea 15% o 30%) es crédito Art.41A contra el GC.
-    retencion_dividendos_clp = round(retencion_dividendos_usd * dolar_observado)
+    #
+    # Desde que el importador lee la sección Withholding Tax del extracto, la retención
+    # sale de las transacciones. El parámetro sigue existiendo como override manual para
+    # cuentas sin extracto importado (o para completar con un Form 1042-S en mano).
+    retencion_importada_usd = sum(abs(t.total_amount) for t in retenciones)
+    retencion_efectiva_usd = retencion_dividendos_usd or retencion_importada_usd
+    retencion_dividendos_clp = round(retencion_efectiva_usd * dolar_observado)
     # Tope del crédito = tasa_efectiva_GC × renta_extranjera_total
     renta_extranjera_clp = renta_inversiones_clp  # toda la renta de inversiones es de fuente USA
     tope_credito_exterior = round(tasa_efectiva / 100 * renta_extranjera_clp)
@@ -386,6 +395,8 @@ async def get_fiscal_report(
             "primas_netas": round(primas_netas_usd, 2),
             "dividendos": round(dividendos_usd, 2),
             "comisiones_totales": round(comisiones_usd, 2),
+            "retencion_dividendos": round(retencion_efectiva_usd, 2),
+            "retencion_origen": "manual" if retencion_dividendos_usd else "importada",
         },
         "resumen_clp": {
             "ganancia_capital": ganancia_capital_clp,

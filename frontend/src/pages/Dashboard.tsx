@@ -7,7 +7,7 @@ import CoveredCallCycles from '../components/CoveredCallCycles'
 import PortfolioGrowthChart from '../components/PortfolioGrowthChart'
 import TWRChart from '../components/TWRChart'
 import PositionsPnLChart, { PositionPnL } from '../components/PositionsPnLChart'
-import { AllocationResponse, PremiumTimelineData, PerformanceMetrics } from '../types'
+import { AllocationResponse, CashInfo, PremiumTimelineData, PerformanceMetrics } from '../types'
 
 interface DashboardSummary {
   total_stocks: number
@@ -135,8 +135,10 @@ function Dashboard() {
   const [twrData, setTwrData] = useState<TWRData | null>(null)
   const [twrLoading, setTwrLoading] = useState(false)
   const [cashBalance, setCashBalance] = useState<number>(0)
+  const [cashInfo, setCashInfo] = useState<CashInfo | null>(null)
   const [editingCash, setEditingCash] = useState(false)
   const [cashInput, setCashInput] = useState('')
+  const [cashDateInput, setCashDateInput] = useState('')
   const [cashSaving, setCashSaving] = useState(false)
   const [loading, setLoading] = useState(true)
   const [metricsDays, setMetricsDays] = useState(365)
@@ -153,23 +155,38 @@ function Dashboard() {
     return () => clearInterval(interval)
   }, [])
 
+  const applyCash = (data: CashInfo) => {
+    setCashInfo(data)
+    setCashBalance(data.cash_balance ?? 0)
+  }
+
   const fetchCash = async () => {
     try {
-      const res = await api.get<{ cash_balance: number }>('/api/auth/cash')
-      setCashBalance(res.data.cash_balance ?? 0)
+      const res = await api.get<CashInfo>('/api/auth/cash')
+      applyCash(res.data)
     } catch { /* ignorar */ }
   }
 
+  // Guarda el ancla, no el saldo: el saldo sale de sumar los movimientos encima.
   const saveCash = async () => {
     const val = parseFloat(cashInput.replace(/,/g, '.'))
     if (isNaN(val) || val < 0) return
     setCashSaving(true)
     try {
-      const res = await api.put<{ cash_balance: number }>('/api/auth/cash', { cash_balance: val })
-      setCashBalance(res.data.cash_balance)
+      const res = await api.put<CashInfo>('/api/auth/cash', {
+        cash_balance: val,
+        opening_date: cashDateInput ? `${cashDateInput}T00:00:00Z` : null,
+      })
+      applyCash(res.data)
       setEditingCash(false)
-    } catch { alert('Error al guardar el saldo') }
+    } catch { alert('Error al guardar el saldo inicial') }
     finally { setCashSaving(false) }
+  }
+
+  const openCashEditor = () => {
+    setCashInput((cashInfo?.opening_balance ?? 0).toFixed(2))
+    setCashDateInput(cashInfo?.opening_date ? cashInfo.opening_date.slice(0, 10) : '')
+    setEditingCash(true)
   }
 
   const fetchSummary = async () => {
@@ -442,15 +459,15 @@ function Dashboard() {
           </dd>
         </div>
 
-        {/* Cash disponible — editable manualmente */}
+        {/* Cash disponible — derivado de las transacciones sobre un saldo inicial */}
         <div className="bg-white dark:bg-gray-800 overflow-hidden shadow rounded-lg p-5">
           <div className="flex items-center justify-between mb-1">
             <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Cash Disponible</dt>
             {!editingCash && (
               <button
-                onClick={() => { setCashInput(cashBalance.toFixed(2)); setEditingCash(true) }}
+                onClick={openCashEditor}
                 className="text-gray-400 hover:text-blue-500 transition-colors"
-                title="Editar saldo"
+                title="Ajustar saldo inicial"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2a2 2 0 01.586-1.414z" />
@@ -460,6 +477,9 @@ function Dashboard() {
           </div>
           {editingCash ? (
             <div className="mt-1">
+              <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                Saldo inicial y desde cuándo contar los movimientos
+              </label>
               <div className="flex items-center gap-1">
                 <span className="text-gray-400 text-sm">$</span>
                 <input
@@ -473,6 +493,16 @@ function Dashboard() {
                   className="w-full border border-blue-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white text-gray-900"
                 />
               </div>
+              <input
+                type="date"
+                value={cashDateInput}
+                onChange={e => setCashDateInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveCash(); if (e.key === 'Escape') setEditingCash(false) }}
+                className="w-full mt-1 border border-blue-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white text-gray-900"
+              />
+              <p className="text-[11px] text-gray-400 mt-1">
+                Sin fecha se suma todo el historial.
+              </p>
               <div className="flex gap-2 mt-2">
                 <button
                   onClick={saveCash}
@@ -494,6 +524,17 @@ function Dashboard() {
               <dd className="mt-1 text-2xl font-semibold text-blue-600 dark:text-blue-400">
                 {formatCurrency(cashBalance)}
               </dd>
+              {cashInfo && (
+                <dd className="text-xs text-gray-400 dark:text-gray-500 mt-1">
+                  {formatCurrency(cashInfo.opening_balance)}
+                  {cashInfo.opening_date ? ` al ${cashInfo.opening_date.slice(0, 10)}` : ' inicial'}
+                  {' '}+ {cashInfo.transactions_counted} movimientos
+                  <span className="block">
+                    Entradas {formatCurrency(cashInfo.inflows)} · Salidas {formatCurrency(cashInfo.outflows)} ·
+                    Comisiones {formatCurrency(cashInfo.commissions)}
+                  </span>
+                </dd>
+              )}
               <dd className="text-xs text-gray-400 dark:text-gray-500 mt-1">
                 Valor de mercado + cash:{' '}
                 <span className="font-medium text-gray-600 dark:text-gray-300">

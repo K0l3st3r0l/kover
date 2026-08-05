@@ -15,6 +15,8 @@ class TransactionType(str, enum.Enum):
     DIVIDEND = "DIVIDEND"
     DEPOSIT = "DEPOSIT"      # Depósito de efectivo a la cuenta
     WITHDRAWAL = "WITHDRAWAL"  # Retiro de efectivo de la cuenta
+    FEE = "FEE"              # Gasto del bróker (datos de mercado, etc.)
+    WITHHOLDING_TAX = "WITHHOLDING_TAX"  # Retención de EE.UU., acreditable Art. 41A
 
 class Transaction(Base):
     __tablename__ = "transactions"

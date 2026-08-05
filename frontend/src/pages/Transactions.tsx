@@ -85,7 +85,9 @@ function Transactions() {
       'DIVIDEND': 'Dividend',
       'OPTION_EXPIRY': 'Option Expiry',
       'DEPOSIT': 'Deposit',
-      'WITHDRAWAL': 'Withdrawal'
+      'WITHDRAWAL': 'Withdrawal',
+      'FEE': 'Fee',
+      'WITHHOLDING_TAX': 'Withholding Tax'
     }
     return labels[type] || type
   }
@@ -102,7 +104,9 @@ function Transactions() {
       'DIVIDEND': 'text-blue-600 bg-blue-50 dark:bg-blue-900/30 dark:text-blue-300',
       'OPTION_EXPIRY': 'text-amber-600 bg-amber-50 dark:bg-amber-900/30 dark:text-amber-300',
       'DEPOSIT': 'text-sky-600 bg-sky-50 dark:bg-sky-900/30 dark:text-sky-300',
-      'WITHDRAWAL': 'text-orange-600 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-300'
+      'WITHDRAWAL': 'text-orange-600 bg-orange-50 dark:bg-orange-900/30 dark:text-orange-300',
+      'FEE': 'text-slate-600 bg-slate-100 dark:bg-slate-700/50 dark:text-slate-300',
+      'WITHHOLDING_TAX': 'text-rose-600 bg-rose-50 dark:bg-rose-900/30 dark:text-rose-300'
     }
     return colors[type] || 'text-gray-600 bg-gray-50 dark:bg-gray-700 dark:text-gray-300'
   }

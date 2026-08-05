@@ -384,7 +384,11 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
                 "quantity": parse_float(quantity_str),
                 "t_price": parse_float(price_str),
                 "proceeds": parse_float(proceeds_str),
-                "comm_fee": parse_float(comm_str),
+                # IB reporta la comisión negativa cuando cobra. Se invierte para
+                # dejar positivo = costo, que es la convención en la BD. Las
+                # recompras en que IB devuelve comisión quedan negativas y así
+                # el saldo de caja cuadra sin casos especiales.
+                "comm_fee": -parse_float(comm_str),
                 "description": "",
                 "code": code,
             })
@@ -416,6 +420,56 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
                 "proceeds": parse_float(amount_str),
                 "comm_fee": 0.0,
                 "description": description,
+            })
+
+        # ── Sección Withholding Tax ─────────────────────────────────────────
+        # Va separada de Fees: la retención de EE.UU. es acreditable contra el
+        # Global Complementario (Art. 41A) y `api/fiscal.py` la necesita aparte.
+        elif section == "Withholding Tax":
+            if data.get("Currency", "").strip() == "Total":
+                continue
+
+            amount = parse_float(data.get("Amount", "0"))
+            if amount == 0:
+                continue
+
+            description = data.get("Description", "").strip()
+            # "F(US3453708600) Payment in Lieu of Dividend - US Tax" → F
+            ticker_match = re.match(r"^([A-Z0-9]{1,10})[\s(]", description)
+
+            rows.append({
+                "line": line_num,
+                "section": "WithholdingTax",
+                "asset_category": "Stocks",
+                "symbol": ticker_match.group(1) if ticker_match else CASH_TICKER,
+                "datetime_str": data.get("Date", "").strip(),
+                "quantity": 0.0,
+                "t_price": 0.0,
+                "proceeds": amount,
+                "comm_fee": 0.0,
+                "description": description,
+            })
+
+        # ── Sección Fees ────────────────────────────────────────────────────
+        elif section == "Fees":
+            if data.get("Subtitle", "").strip() == "Total" or data.get("Currency", "").strip() == "Total":
+                continue
+
+            amount = parse_float(data.get("Amount", "0"))
+            if amount == 0:
+                continue
+
+            rows.append({
+                "line": line_num,
+                "section": "Fee",
+                "asset_category": "Cash",
+                "symbol": CASH_TICKER,
+                "datetime_str": data.get("Date", "").strip(),
+                "quantity": 0.0,
+                "t_price": 0.0,
+                "proceeds": amount,   # negativo = cobro, positivo = reverso
+                "comm_fee": 0.0,
+                "description": data.get("Description", "").strip(),
             })
 
         # ── Sección Deposits & Withdrawals ──────────────────────────────────
@@ -461,7 +515,7 @@ def parse_ib_csv(content: str) -> tuple[list[dict], list[str]]:
                 "quantity": parse_float(quantity_str),
                 "t_price": 0.0,
                 "proceeds": parse_float(proceeds_str),
-                "comm_fee": parse_float(comm_str),
+                "comm_fee": -parse_float(comm_str),
                 "description": description,
             })
 
@@ -812,6 +866,21 @@ def build_parsed_transactions(
             precio = raw["t_price"]
             notas = raw.get("description", "Assignment IB")
 
+        # ── Retención de impuesto / fee del bróker ─────────────────────────
+        elif section in ("WithholdingTax", "Fee"):
+            ticker = symbol.upper()
+            tipo = (TransactionType.WITHHOLDING_TAX if section == "WithholdingTax"
+                    else TransactionType.FEE)
+            # IB los reporta negativos cuando cobra. Se invierte el signo para
+            # respetar la convención (positivo = sale caja), de modo que un
+            # reverso —IB cobró y devolvió— queda negativo y suma de vuelta.
+            total_usd = -raw["proceeds"]
+            cantidad = 0.0
+            precio = 0.0
+            notas = raw.get("description", "") or (
+                "Retención IB" if section == "WithholdingTax" else "Fee IB"
+            )
+
         # ── Movimiento de efectivo ─────────────────────────────────────────
         elif section == "CashFlow":
             monto = raw["proceeds"]
@@ -894,7 +963,9 @@ def build_parsed_transactions(
                 if total_usd > 0 and (total_usd / expected > 10 or expected / total_usd > 10):
                     advertencia = f"Total ${total_usd:,.2f} difiere mucho de qty×precio (${expected:,.2f}). Posible error de formato en el CSV."
 
-        comision = abs(raw.get("comm_fee", 0.0))
+        # Con signo: el CSV ya viene normalizado a positivo = costo, y el pegado
+        # manual solo produce positivos. Un negativo es una devolución de IB.
+        comision = raw.get("comm_fee", 0.0)
 
         # Detectar duplicado usando una firma de la operación
         sig = (ticker, dt.strftime("%Y-%m-%d"), tipo.value, round(total_usd, 2), round(cantidad, 4))
