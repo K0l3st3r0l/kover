@@ -4,6 +4,9 @@
 # ============================================================
 set -e
 
+source /root/apps/wiki/deploy-guard.sh
+deploy_guard_enter "kover/full" || exit $?
+
 echo "💰 Desplegando Kover..."
 
 # Verificar que existe .env
