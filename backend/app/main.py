@@ -3,7 +3,12 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets, news, dividends
+from .logging_config import configure_logging, get_logger
+from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets, news, dividends, campaigns, data_health
+from .jobs.scheduler import shutdown_scheduler, start_scheduler
+
+configure_logging()
+logger = get_logger(__name__)
 
 # Crear las tablas
 Base.metadata.create_all(bind=engine)
@@ -39,11 +44,23 @@ app.include_router(import_ib.router, prefix="/api/import-ib", tags=["import-ib"]
 app.include_router(chilean_markets.router, prefix="/api/market", tags=["chilean-markets"])
 app.include_router(news.router, prefix="/api/news", tags=["news"])
 app.include_router(dividends.router, prefix="/api/dividends", tags=["dividends"])
+app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"])
+app.include_router(data_health.router, prefix="/api/data-health", tags=["data-health"])
 
 @app.on_event("startup")
 def _start_ai_committee_loop():
     if chilean_markets.AI_API_KEY:
         threading.Thread(target=chilean_markets.ai_committee_background_loop, daemon=True).start()
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+def _stop_scheduler():
+    shutdown_scheduler()
 
 @app.get("/")
 async def root():

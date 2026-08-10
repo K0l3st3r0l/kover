@@ -16,6 +16,7 @@ import ChileanMarkets from './pages/ChileanMarkets'
 import News from './pages/News'
 import MacroCalendar from './pages/MacroCalendar'
 import Dividends from './pages/Dividends'
+import Campaigns from './pages/Campaigns'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth()
@@ -33,6 +34,7 @@ const NAV_LINKS = [
   { to: '/',             exact: true,  label: 'Dashboard' },
   { to: '/stocks',       exact: false, label: 'Stocks' },
   { to: '/options',      exact: false, label: 'Options' },
+  { to: '/campaigns',    exact: false, label: 'Campañas' },
   { to: '/transactions', exact: false, label: 'Historial' },
   { to: '/watchlist',    exact: false, label: 'Watchlist' },
   { to: '/calculator',   exact: false, label: 'Calculadora' },
@@ -252,6 +254,7 @@ function AppContent() {
           <Route path="/noticias"     element={<PrivateRoute><News /></PrivateRoute>} />
           <Route path="/noticias/calendario" element={<PrivateRoute><MacroCalendar /></PrivateRoute>} />
           <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
+          <Route path="/campaigns"    element={<PrivateRoute><Campaigns /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>
       </main>
