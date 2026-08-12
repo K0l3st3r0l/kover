@@ -25,14 +25,17 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from pydantic import BaseModel
+from zoneinfo import ZoneInfo
 import csv
 import io
 import re
 
 from ..database import get_db
-from ..models import Transaction, TransactionType, Stock, Option, OptionType, OptionStrategy, OptionStatus, User
+from ..models import Transaction, TransactionType, Stock, Option, OptionType, OptionStrategy, OptionStatus, User, BrokerSyncRun
 from ..utils.auth import get_current_user
 from ..market.market_data import MarketDataService
+from ..providers.base import BrokerCashTransaction, BrokerExecution, BrokerPositionLot, ProviderError
+from ..providers.ibkr_flex import IbkrFlexBrokerProvider
 
 router = APIRouter()
 
@@ -56,6 +59,7 @@ class ParsedTransaction(BaseModel):
     expiration_date: Optional[str] = None  # YYYY-MM-DD, solo para opciones
     opt_type: Optional[str] = None         # C o P, solo para opciones
     es_asignacion: bool = False            # el contrato se cerró por asignación
+    duplicado_metodo: Optional[str] = None  # hash_exacto | cierre_cero | grupo_agregado
 
 
 class PreviewResponse(BaseModel):
@@ -79,6 +83,11 @@ class ImportResult(BaseModel):
     stocks_creados: List[str]
     stocks_actualizados: List[str]
     errores: List[str]
+
+
+class FlexPreviewResponse(PreviewResponse):
+    posiciones_discrepantes: List[dict] = []
+    advertencia_global: Optional[str] = None
 
 
 class ManualPreviewRequest(BaseModel):
@@ -822,11 +831,22 @@ def build_parsed_transactions(
     """
     Convierte las filas crudas en ParsedTransaction.
     existing_hashes: set de (ticker, fecha_str, tipo, total) ya en BD → para detectar duplicados.
+
+    El fallback de grupo (fills fragmentados vs. fila agregada) es simétrico:
+    se agrupan tanto las filas ya en BD como las filas entrantes de esta
+    importación por (ticker, fecha, tipo) y se comparan las sumas — sin
+    importar de qué lado está fragmentada la orden. Antes solo cubría BD
+    fragmentada + fila entrante agregada (una fuente CSV/manual siempre trae
+    una fila por orden); IBKR Flex puede entregar fills fragmentados contra
+    una BD que ya tiene la fila agregada, el caso inverso. Ver
+    wiki/projects/kover/bugs/duplicado-btbt-import-manual-csv.md.
     """
-    results: list[ParsedTransaction] = []
     errors: list[str] = []
     zero_closes = existing_zero_closes or {}
     groups = existing_groups or {}
+
+    # ── Pasada 1: derivar los campos de cada fila (misma lógica de siempre) ────
+    staged: list[dict] = []
 
     for raw in raw_rows:
         line = raw["line"]
@@ -845,6 +865,7 @@ def build_parsed_transactions(
         advertencia = ""
         opt_info = None
         es_asignacion = False
+        _strike = _expiry = _opt_type = None
 
         # ── Dividendo ──────────────────────────────────────────────────────
         if section == "Dividends":
@@ -857,8 +878,10 @@ def build_parsed_transactions(
 
         # ── Asignación ─────────────────────────────────────────────────────
         elif section == "CorporateActions":
-            # Intentar extraer ticker del símbolo de opción
-            opt_info = parse_ib_option_symbol(symbol)
+            # opt_info: si el adaptador de un bróker ya trae los datos
+            # estructurados (underlying/strike/expiración/right) se usan
+            # directos — evita reparsear un string sintetizado con regex.
+            opt_info = raw.get("opt_info") or parse_ib_option_symbol(symbol)
             ticker = opt_info[0] if opt_info else symbol.upper()
             tipo = TransactionType.ASSIGNMENT
             total_usd = abs(raw["proceeds"])
@@ -893,7 +916,7 @@ def build_parsed_transactions(
 
         # ── Expiración de opción sin valor ──────────────────────────────────
         elif section == "OptionExpiry":
-            opt_info = parse_ib_option_symbol(symbol)
+            opt_info = raw.get("opt_info") or parse_ib_option_symbol(symbol)
             if not opt_info:
                 errors.append(f"Línea {line}: símbolo de opción no reconocido '{symbol}' – fila omitida")
                 continue
@@ -918,7 +941,7 @@ def build_parsed_transactions(
             asignado = has_ib_code(raw.get("code", ""), "A")
 
             if "option" in asset_cat.lower():
-                opt_info = parse_ib_option_symbol(symbol)
+                opt_info = raw.get("opt_info") or parse_ib_option_symbol(symbol)
                 if not opt_info:
                     errors.append(f"Línea {line}: símbolo de opción no reconocido '{symbol}' – fila omitida")
                     continue
@@ -950,9 +973,6 @@ def build_parsed_transactions(
                 # Sigue siendo BUY_STOCK/SELL_STOCK: las acciones se mueven de
                 # verdad y tienen que afectar la posición como cualquier trade.
                 notas = "Asignación | acciones al strike" if asignado else "Importado desde IB"
-                _strike = None
-                _expiry = None
-                _opt_type = None
 
             # Advertir si precio es 0 (en una asignación el contrato vale 0 por definición)
             if precio == 0 and not es_asignacion and tipo not in (TransactionType.DIVIDEND, TransactionType.ASSIGNMENT):
@@ -967,9 +987,34 @@ def build_parsed_transactions(
         # manual solo produce positivos. Un negativo es una devolución de IB.
         comision = raw.get("comm_fee", 0.0)
 
-        # Detectar duplicado usando una firma de la operación
+        staged.append({
+            "line": line, "section": section, "fecha_iso": fecha_iso, "dt": dt,
+            "ticker": ticker, "tipo": tipo, "asset_category": raw["asset_category"],
+            "cantidad": cantidad, "precio": precio, "total_usd": total_usd,
+            "comision": comision, "notas": notas, "advertencia": advertencia,
+            "strike": _strike, "expiry": _expiry, "opt_type": _opt_type,
+            "es_asignacion": es_asignacion,
+        })
+
+    # ── Pasada 2: agrupar las filas ENTRANTES por (ticker, fecha, tipo) ────────
+    # Mismo agrupamiento que build_existing_hashes aplica sobre la BD.
+    incoming_groups: dict[tuple[str, str, str], dict] = {}
+    for row in staged:
+        key = (row["ticker"], row["dt"].strftime("%Y-%m-%d"), row["tipo"].value)
+        g = incoming_groups.setdefault(key, {"qty_sum": 0.0, "total_sum": 0.0, "count": 0})
+        g["qty_sum"] += row["cantidad"]
+        g["total_sum"] += row["total_usd"]
+        g["count"] += 1
+
+    # ── Pasada 3: decidir duplicado (hash exacto → cierre cero → grupo) ────────
+    results: list[ParsedTransaction] = []
+    for row in staged:
+        ticker, tipo, dt = row["ticker"], row["tipo"], row["dt"]
+        cantidad, total_usd = row["cantidad"], row["total_usd"]
+
         sig = (ticker, dt.strftime("%Y-%m-%d"), tipo.value, round(total_usd, 2), round(cantidad, 4))
         duplicado = sig in existing_hashes
+        duplicado_metodo = "hash_exacto" if duplicado else None
 
         # Fallback: cierres de opción sin valor (OPTION_EXPIRY / BUY_CALL / BUY_PUT a $0)
         # pueden estar ya en BD bajo otro tipo y/o con fecha de liquidación distinta.
@@ -977,42 +1022,211 @@ def build_parsed_transactions(
             for existing_dt in zero_closes.get((ticker, round(cantidad, 4)), []):
                 if abs((existing_dt.date() - dt.date()).days) <= ZERO_CLOSE_DATE_MARGIN_DAYS:
                     duplicado = True
+                    duplicado_metodo = "cierre_cero"
                     break
 
-        # Fallback: la misma orden puede estar en BD repartida en varias filas
-        # (fills parciales) en vez de la fila agregada que trae el CSV. Si la suma
-        # de cantidad/total del grupo (ticker+fecha+tipo) ya existente calza con
-        # esta fila, es la misma operación ya importada.
+        # Fallback: la misma orden puede estar repartida en varias filas (fills
+        # parciales) de un lado y agregada del otro — no importa cuál lado (BD o
+        # esta importación) esté fragmentado, solo que la suma calce.
         if not duplicado:
-            group = groups.get((ticker, dt.strftime("%Y-%m-%d"), tipo.value))
+            key = (ticker, dt.strftime("%Y-%m-%d"), tipo.value)
+            existing_group = groups.get(key)
+            incoming_group = incoming_groups.get(key)
             if (
-                group and group["count"] > 1
-                and round(group["qty_sum"], 4) == round(cantidad, 4)
-                and round(group["total_sum"], 2) == round(total_usd, 2)
+                existing_group and incoming_group
+                and round(existing_group["qty_sum"], 4) == round(incoming_group["qty_sum"], 4)
+                and round(existing_group["total_sum"], 2) == round(incoming_group["total_sum"], 2)
             ):
                 duplicado = True
+                duplicado_metodo = "grupo_agregado"
 
         results.append(ParsedTransaction(
-            ib_row=line,
-            fecha=fecha_iso,
+            ib_row=row["line"],
+            fecha=row["fecha_iso"],
             ticker=ticker,
             tipo=tipo.value,
             tipo_label=TIPO_LABELS.get(tipo.value, tipo.value),
-            asset_category=raw["asset_category"],
+            asset_category=row["asset_category"],
             cantidad=cantidad,
-            precio_usd=round(precio, 4),
+            precio_usd=round(row["precio"], 4),
             total_usd=round(total_usd, 2),
-            comision_usd=round(comision, 4),
-            notas=notas,
-            advertencia=advertencia,
+            comision_usd=round(row["comision"], 4),
+            notas=row["notas"],
+            advertencia=row["advertencia"],
             duplicado=duplicado,
-            strike_price=_strike if section in ("Trades", "OptionExpiry") else None,
-            expiration_date=_expiry if section in ("Trades", "OptionExpiry") else None,
-            opt_type=_opt_type if section in ("Trades", "OptionExpiry") else None,
-            es_asignacion=es_asignacion,
+            duplicado_metodo=duplicado_metodo,
+            strike_price=row["strike"] if row["section"] in ("Trades", "OptionExpiry") else None,
+            expiration_date=row["expiry"] if row["section"] in ("Trades", "OptionExpiry") else None,
+            opt_type=row["opt_type"] if row["section"] in ("Trades", "OptionExpiry") else None,
+            es_asignacion=row["es_asignacion"],
         ))
 
     return results, errors
+
+
+# ─── Adaptador IBKR Flex → raw_rows ────────────────────────────────────────────
+# Convierte los dataclasses de app/providers/base.py a la misma forma de dict
+# que ya producen parse_ib_csv/parse_manual_trade_block, para que
+# build_parsed_transactions y todo lo que sigue (incluido /confirm) no
+# distinga si el origen fue un CSV, texto pegado o IBKR Flex.
+
+def broker_execution_to_raw_row(execution: BrokerExecution, line: int) -> Optional[dict]:
+    """Una BrokerExecution -> raw_row de sección Trades u OptionExpiry.
+
+    El signo de `quantity` se reconstruye desde `side` (la dataclass lo
+    guarda sin signo + dirección separada, justo para no tener que adivinar
+    la convención de signo del bróker). La fecha civil se reconstruye desde
+    `executed_at_utc` + `source_timezone` — nunca se usa el UTC directo: una
+    ejecución después de ~19:00 ET cruza la medianoche UTC y correría la
+    fecha un día, rompiendo el dedupe por (ticker, fecha, tipo) en silencio.
+    """
+    if execution.has_code("Ca"):
+        return None  # cancelación/corrección — igual que parse_ib_csv
+
+    local_dt = execution.executed_at_utc.astimezone(ZoneInfo(execution.source_timezone))
+    datetime_str = local_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    opt_info = None
+    if (
+        execution.asset_category == "OPT"
+        and execution.underlying and execution.right
+        and execution.strike is not None and execution.expiration
+    ):
+        opt_info = (execution.underlying, execution.right, execution.strike, execution.expiration.isoformat())
+
+    signed_qty = execution.quantity if execution.side == "BUY" else -execution.quantity
+    # El bróker reporta la comisión negativa cuando cobra; se invierte para
+    # dejar positivo = costo, igual que hace parse_ib_csv con el CSV crudo.
+    comm_fee = -execution.commission
+
+    if execution.has_code("Ep"):
+        return {
+            "line": line,
+            "section": "OptionExpiry",
+            "asset_category": "Equity and Index Options",
+            "symbol": execution.symbol,
+            "datetime_str": datetime_str,
+            "quantity": execution.quantity,
+            "t_price": 0.0,
+            "proceeds": 0.0,
+            "comm_fee": comm_fee,
+            "description": f"Expiración IBKR Flex | {execution.symbol}",
+            "opt_info": opt_info,
+        }
+
+    return {
+        "line": line,
+        "section": "Trades",
+        "asset_category": "Stocks" if execution.asset_category == "STK" else "Equity and Index Options",
+        "symbol": execution.symbol,
+        "datetime_str": datetime_str,
+        "quantity": signed_qty,
+        "t_price": execution.price,
+        "proceeds": execution.proceeds,
+        "comm_fee": comm_fee,
+        "description": "",
+        "code": ";".join(execution.codes),
+        "opt_info": opt_info,
+    }
+
+
+def broker_executions_to_raw_rows(executions: list[BrokerExecution]) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    for idx, execution in enumerate(executions, start=1):
+        row = broker_execution_to_raw_row(execution, idx)
+        if row is not None:
+            rows.append(row)
+    return rows, []
+
+
+def broker_cash_to_raw_rows(cash_txs: list[BrokerCashTransaction]) -> tuple[list[dict], list[str]]:
+    """CashTransaction (dividendos, retenciones, fees, depósitos/retiros) -> raw_rows.
+
+    Usa `settle_date` (fecha civil pura que Flex ya entrega, sin componente de
+    hora) en vez de convertir `executed_at_utc` — igual que parse_ib_csv, que
+    lee la columna "Date"/"Settle Date" del CSV directo para estas secciones,
+    nunca una hora exacta.
+    """
+    rows: list[dict] = []
+    errors: list[str] = []
+    for idx, tx in enumerate(cash_txs, start=1):
+        if tx.settle_date is None:
+            errors.append(
+                f"Movimiento de efectivo IBKR Flex sin fecha de liquidación (tipo={tx.type!r}) – fila omitida"
+            )
+            continue
+
+        datetime_str = tx.settle_date.strftime("%Y-%m-%d")
+        symbol = (tx.symbol or "").strip().upper() or CASH_TICKER
+        tx_type = (tx.type or "").strip()
+        base = {
+            "line": idx,
+            "datetime_str": datetime_str,
+            "quantity": 0.0,
+            "t_price": 0.0,
+            "proceeds": tx.amount,
+            "comm_fee": 0.0,
+        }
+
+        if tx_type in ("Dividends", "Payment In Lieu Of Dividends"):
+            description = tx.description or (
+                "Dividendo IBKR Flex" if tx_type == "Dividends"
+                else "Pago sustitutivo de dividendo (no calificado) IBKR Flex"
+            )
+            rows.append({**base, "section": "Dividends", "asset_category": "Stocks",
+                         "symbol": symbol, "description": description})
+        elif tx_type == "Withholding Tax":
+            rows.append({**base, "section": "WithholdingTax", "asset_category": "Stocks",
+                         "symbol": symbol, "description": tx.description or "Retención IBKR Flex"})
+        elif tx_type in ("Deposits/Withdrawals", "Deposits & Withdrawals", "Transfers"):
+            # Defensivo: al 2026-08-12 la Flex Query "Kover Activity" no trae
+            # esta sección a nivel detalle (solo el total agregado en
+            # CashReport) — ver docstring de app/providers/ibkr_flex.py. Si se
+            # habilita en IBKR Client Portal, este branch ya queda listo.
+            rows.append({**base, "section": "CashFlow", "asset_category": "Cash",
+                         "symbol": CASH_TICKER, "description": tx.description or "Movimiento de efectivo IBKR Flex"})
+        else:
+            # "Other Fees", "AF" y cualquier otro tipo de cobro caen en Fee
+            # genérico — igual que parse_ib_csv trata toda la sección Fees sin
+            # distinguir subtipos.
+            rows.append({**base, "section": "Fee", "asset_category": "Cash",
+                         "symbol": CASH_TICKER, "description": tx.description or f"Fee IBKR Flex ({tx_type})"})
+
+    return rows, errors
+
+
+def build_position_reconciliation(
+    db: Session, current_user: User, lots: list[BrokerPositionLot]
+) -> list[dict]:
+    """Compara Stock.shares de Kover contra las posiciones que reporta IBKR.
+
+    Chequeo independiente del dedupe: si el dedupe se equivoca en cualquier
+    dirección (importa de más o de menos), las acciones divergen de lo que
+    IBKR realmente tiene — sin depender para nada de la heurística de grupo.
+    Informativo: no bloquea el preview, solo lo advierte.
+    """
+    stocks = db.query(Stock).filter(Stock.user_id == current_user.id, Stock.is_active == True).all()
+    kover_shares = {s.ticker.upper(): s.shares for s in stocks}
+
+    ibkr_shares: dict[str, float] = {}
+    for lot in lots:
+        if lot.asset_category != "STK":
+            continue  # posiciones de opciones abiertas no tienen Stock.shares equivalente
+        ticker = lot.symbol.upper()
+        ibkr_shares[ticker] = ibkr_shares.get(ticker, 0.0) + lot.quantity
+
+    discrepancias: list[dict] = []
+    for ticker in sorted(set(kover_shares) | set(ibkr_shares)):
+        kover_qty = kover_shares.get(ticker, 0.0)
+        ibkr_qty = ibkr_shares.get(ticker, 0.0)
+        if round(kover_qty, 4) != round(ibkr_qty, 4):
+            discrepancias.append({
+                "ticker": ticker,
+                "kover_shares": kover_qty,
+                "ibkr_shares": ibkr_qty,
+                "diferencia": round(ibkr_qty - kover_qty, 4),
+            })
+    return discrepancias
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -1059,6 +1273,84 @@ async def preview_manual_import(
         raise HTTPException(status_code=400, detail=parse_errors[0])
 
     return build_preview_response(raw_rows, parse_errors, db, current_user)
+
+
+@router.post("/preview-flex", response_model=FlexPreviewResponse)
+async def preview_flex_import(
+    incluir_efectivo: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Trae ejecuciones, efectivo y posiciones desde IBKR Flex (Activity
+    Statement), las adapta a la misma forma que el CSV/texto pegado, y
+    devuelve un preview — no escribe nada. Se confirma con el mismo /confirm
+    que ya usan el CSV y el texto pegado, sin cambios.
+    """
+    run = BrokerSyncRun(
+        user_id=current_user.id,
+        source="ACTIVITY",
+        triggered_by="MANUAL",
+        status="OK",
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    provider = IbkrFlexBrokerProvider()
+    try:
+        executions = provider.get_executions()
+        trade_rows, trade_errors = broker_executions_to_raw_rows(executions)
+
+        cash_rows: list[dict] = []
+        cash_errors: list[str] = []
+        if incluir_efectivo:
+            cash_txs = provider.get_cash_transactions()
+            cash_rows, cash_errors = broker_cash_to_raw_rows(cash_txs)
+            # Cada adaptador numera "line" desde 1 por su cuenta; al combinar
+            # ambas listas hay que renumerar para que ib_row sea único (el
+            # frontend lo usa como key de fila y como identificador del
+            # checkbox de "forzar importación").
+            offset = len(trade_rows)
+            for i, row in enumerate(cash_rows, start=1):
+                row["line"] = offset + i
+
+        lots = provider.get_position_lots()
+    except ProviderError as exc:
+        # Nunca dejar caer al fallback silencioso de "0 filas": un preview
+        # vacío por error es indistinguible de "ya está todo sincronizado".
+        run.status = "ERROR"
+        run.error_message = str(exc)[:2000]
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"IBKR Flex falló: {exc}")
+
+    raw_rows = trade_rows + cash_rows
+    parse_errors = trade_errors + cash_errors
+
+    base_preview = build_preview_response(raw_rows, parse_errors, db, current_user)
+    posiciones_discrepantes = build_position_reconciliation(db, current_user, lots)
+
+    advertencia_global = None
+    if len(raw_rows) > 500:
+        advertencia_global = (
+            f"{len(raw_rows)} filas en este preview — volumen inusualmente alto. "
+            "Verifica que la Flex Query esté trayendo el período esperado antes de confirmar."
+        )
+
+    run.raw_row_count = len(raw_rows)
+    run.importable_count = base_preview.total_importables
+    run.duplicate_count = base_preview.total_duplicados
+    run.warning_count = base_preview.total_advertencias
+    run.position_mismatches = posiciones_discrepantes
+    run.finished_at = datetime.utcnow()
+    db.commit()
+
+    return FlexPreviewResponse(
+        **base_preview.model_dump(),
+        posiciones_discrepantes=posiciones_discrepantes,
+        advertencia_global=advertencia_global,
+    )
 
 
 @router.post("/confirm", response_model=ImportResult)

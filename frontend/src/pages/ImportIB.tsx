@@ -22,6 +22,7 @@ interface ParsedTransaction {
   expiration_date?: string | null
   opt_type?: string | null
   es_asignacion?: boolean
+  duplicado_metodo?: string | null
 }
 
 interface PreviewResponse {
@@ -32,6 +33,21 @@ interface PreviewResponse {
   total_duplicados: number
   total_advertencias: number
   errores_parseo: string[]
+  posiciones_discrepantes?: PosicionDiscrepante[]
+  advertencia_global?: string | null
+}
+
+interface PosicionDiscrepante {
+  ticker: string
+  kover_shares: number
+  ibkr_shares: number
+  diferencia: number
+}
+
+const DUPLICADO_METODO_LABELS: Record<string, string> = {
+  hash_exacto: 'Coincide exacto con una transacción existente',
+  cierre_cero: 'Cierre de opción a $0 ya registrado en fecha cercana',
+  grupo_agregado: 'La suma de este grupo (ticker+fecha+tipo) ya está en tu historial — puede ser fills fragmentados de una orden ya importada',
 }
 
 interface ImportResult {
@@ -69,7 +85,7 @@ const getTodayISO = () => {
 // ─── Componente ───────────────────────────────────────────────────────────────
 
 type Step = 'upload' | 'preview' | 'done'
-type InputMode = 'csv' | 'manual'
+type InputMode = 'csv' | 'manual' | 'flex'
 
 export default function ImportIB() {
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -82,6 +98,7 @@ export default function ImportIB() {
   const [result, setResult] = useState<ImportResult | null>(null)
   const [manualText, setManualText] = useState('')
   const [manualTradeDate, setManualTradeDate] = useState(getTodayISO)
+  const [incluirEfectivo, setIncluirEfectivo] = useState(true)
   const [omitirDuplicados, setOmitirDuplicados] = useState(true)
   const [showErrors, setShowErrors] = useState(false)
   const [filterTipo, setFilterTipo] = useState('all')
@@ -155,6 +172,40 @@ export default function ImportIB() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handleFlexPreview = async () => {
+    setLoading(true)
+    setError('')
+    setPreview(null)
+
+    try {
+      const res = await api.post<PreviewResponse>(
+        `/api/import-ib/preview-flex?incluir_efectivo=${incluirEfectivo}`
+      )
+      setPreviewSource('flex')
+      setPreview(res.data)
+      setStep('preview')
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Error al traer datos desde IBKR Flex. Verifica la configuración del token y las queries.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Un duplicado detectado por el fallback de grupo puede ser un falso
+  // positivo (ver duplicado_metodo). En vez de apagar el filtro global —que
+  // reimportaría todos los duplicados reales— esto fuerza solo esta fila.
+  const toggleForceRow = (ib_row: number) => {
+    setPreview(prev => {
+      if (!prev) return prev
+      return {
+        ...prev,
+        transacciones: prev.transacciones.map(t =>
+          t.ib_row === ib_row ? { ...t, duplicado: !t.duplicado } : t
+        ),
+      }
+    })
   }
 
   // ── Paso 2: confirmar importación ────────────────────────────────────────
@@ -233,9 +284,19 @@ export default function ImportIB() {
           >
             Pegado manual de Trades
           </button>
+          <button
+            onClick={() => { setInputMode('flex'); setError('') }}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+              inputMode === 'flex'
+                ? 'bg-white dark:bg-gray-700 text-blue-700 dark:text-blue-300 shadow'
+                : 'text-gray-600 dark:text-gray-300'
+            }`}
+          >
+            IBKR Flex (automático)
+          </button>
         </div>
 
-        {inputMode === 'csv' ? (
+        {inputMode === 'csv' && (
           <>
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
               <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
@@ -287,7 +348,9 @@ export default function ImportIB() {
               />
             </div>
           </>
-        ) : (
+        )}
+
+        {inputMode === 'manual' && (
           <div className="space-y-4">
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
               <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
@@ -355,11 +418,56 @@ export default function ImportIB() {
           </div>
         )}
 
+        {inputMode === 'flex' && (
+          <div className="space-y-4">
+            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-xl p-6">
+              <h2 className="font-semibold text-blue-800 dark:text-blue-300 mb-3">
+                🔌 Traer directo desde tu cuenta IBKR
+              </h2>
+              <p className="text-sm text-blue-700 dark:text-blue-300">
+                Trae ejecuciones, dividendos, retenciones, fees, asignaciones y expiraciones de los últimos
+                365 días vía IBKR Flex Web Service. No se guarda nada todavía — es el mismo paso de
+                previsualización que el CSV o el pegado manual, y se confirma igual.
+              </p>
+              <div className="mt-4 p-3 bg-amber-100 dark:bg-amber-900/30 rounded-lg text-xs text-amber-700 dark:text-amber-400">
+                ⚠️ Depósitos y retiros individuales todavía no vienen en esta Flex Query — hay que habilitar
+                la sección "Transfers" en IBKR Client Portal → Reports → Flex Queries para que se incluyan.
+                El resto de las secciones sí está cubierto.
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <label className="flex items-center gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={incluirEfectivo}
+                  onChange={e => setIncluirEfectivo(e.target.checked)}
+                  className="w-4 h-4 rounded"
+                />
+                <span className="text-sm text-gray-700 dark:text-gray-200">
+                  Incluir dividendos, retenciones y fees
+                </span>
+              </label>
+              <button
+                onClick={handleFlexPreview}
+                disabled={loading}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg transition"
+              >
+                🔍 Traer y previsualizar desde IBKR
+              </button>
+            </div>
+          </div>
+        )}
+
         {loading && (
           <div className="flex items-center justify-center gap-3 py-4">
             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />
             <span className="text-gray-600 dark:text-gray-300">
-              {inputMode === 'manual' ? 'Analizando el texto pegado...' : 'Analizando el archivo...'}
+              {inputMode === 'manual'
+                ? 'Analizando el texto pegado...'
+                : inputMode === 'flex'
+                  ? 'Trayendo datos desde IBKR Flex (puede tardar hasta un minuto)...'
+                  : 'Analizando el archivo...'}
             </span>
           </div>
         )}
@@ -488,7 +596,9 @@ export default function ImportIB() {
   if (!preview) return null
 
   const tiposUnicos = [...new Set(preview.transacciones.map(t => t.tipo))]
-  const sourceRowsLabel = previewSource === 'manual' ? 'Bloques pegados' : 'Filas en CSV'
+  const sourceRowsLabel =
+    previewSource === 'manual' ? 'Bloques pegados' : previewSource === 'flex' ? 'Filas de IBKR Flex' : 'Filas en CSV'
+  const importCount = preview.transacciones.filter(t => !(omitirDuplicados && t.duplicado)).length
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
@@ -524,6 +634,46 @@ export default function ImportIB() {
           </div>
         ))}
       </div>
+
+      {/* Advertencia global (ej. volumen anómalo de la Flex Query) */}
+      {preview.advertencia_global && (
+        <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-300 dark:border-orange-700 rounded-lg p-4 text-sm text-orange-700 dark:text-orange-300">
+          ⚠️ {preview.advertencia_global}
+        </div>
+      )}
+
+      {/* Reconciliación de posiciones contra IBKR — red de seguridad independiente del dedupe */}
+      {preview.posiciones_discrepantes && preview.posiciones_discrepantes.length > 0 && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-300 dark:border-red-700 rounded-lg p-4">
+          <p className="font-semibold text-red-700 dark:text-red-300 text-sm mb-2">
+            🚨 {preview.posiciones_discrepantes.length} posiciones no calzan contra IBKR
+          </p>
+          <p className="text-xs text-red-600 dark:text-red-400 mb-3">
+            Independiente del dedupe: si importas esta previsualización y las acciones siguen sin calzar,
+            revisa el historial de este ticker antes de seguir operando sobre él.
+          </p>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left text-red-500 dark:text-red-400">
+                <th className="pr-4 py-1">Ticker</th>
+                <th className="pr-4 py-1 text-right">En Kover</th>
+                <th className="pr-4 py-1 text-right">En IBKR</th>
+                <th className="pr-4 py-1 text-right">Diferencia</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.posiciones_discrepantes.map(p => (
+                <tr key={p.ticker} className="text-red-700 dark:text-red-300">
+                  <td className="pr-4 py-1 font-bold">{p.ticker}</td>
+                  <td className="pr-4 py-1 text-right">{p.kover_shares}</td>
+                  <td className="pr-4 py-1 text-right">{p.ibkr_shares}</td>
+                  <td className="pr-4 py-1 text-right font-semibold">{p.diferencia > 0 ? '+' : ''}{p.diferencia}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Errores de parseo */}
       {preview.errores_parseo.length > 0 && (
@@ -563,12 +713,12 @@ export default function ImportIB() {
         </label>
         <button
           onClick={handleImport}
-          disabled={loading || preview.total_importables === 0}
+          disabled={loading || importCount === 0}
           className="flex-shrink-0 bg-green-600 hover:bg-green-700 disabled:opacity-40 text-white font-bold px-8 py-3 rounded-xl transition text-sm"
         >
           {loading
             ? '⏳ Importando...'
-            : `✅ Importar ${omitirDuplicados ? preview.total_importables : preview.transacciones.length} transacciones`}
+            : `✅ Importar ${omitirDuplicados ? importCount : preview.transacciones.length} transacciones`}
         </button>
       </div>
 
@@ -634,9 +784,20 @@ export default function ImportIB() {
                 >
                   <td className="px-3 py-2 whitespace-nowrap">
                     {t.duplicado ? (
-                      <span className="text-xs text-yellow-600 dark:text-yellow-400 font-medium bg-yellow-50 dark:bg-yellow-900/30 px-2 py-0.5 rounded-full">
-                        🔁 Dup.
-                      </span>
+                      <div className="flex flex-col items-start gap-1">
+                        <span
+                          className="text-xs text-yellow-600 dark:text-yellow-400 font-medium bg-yellow-50 dark:bg-yellow-900/30 px-2 py-0.5 rounded-full"
+                          title={t.duplicado_metodo ? DUPLICADO_METODO_LABELS[t.duplicado_metodo] || t.duplicado_metodo : undefined}
+                        >
+                          🔁 Dup.{t.duplicado_metodo === 'grupo_agregado' ? ' (grupo)' : ''}
+                        </span>
+                        <button
+                          onClick={() => toggleForceRow(t.ib_row)}
+                          className="text-[11px] text-blue-600 dark:text-blue-400 underline"
+                        >
+                          Forzar esta fila
+                        </button>
+                      </div>
                     ) : t.advertencia ? (
                       <span className="text-xs text-orange-600 dark:text-orange-400 font-medium bg-orange-50 dark:bg-orange-900/30 px-2 py-0.5 rounded-full" title={t.advertencia}>
                         ⚠️ Aviso

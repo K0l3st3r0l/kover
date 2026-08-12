@@ -39,6 +39,9 @@ services:
       # de mandar requests anónimos que terminan en bloqueo.
       SEC_USER_AGENT: ${SEC_USER_AGENT:-}
       SEC_MAX_RPS: ${SEC_MAX_RPS:-5}
+      IBKR_FLEX_TOKEN: ${IBKR_FLEX_TOKEN:-}
+      IBKR_FLEX_QUERY_ACTIVITY: ${IBKR_FLEX_QUERY_ACTIVITY:-}
+      IBKR_FLEX_QUERY_TRADES: ${IBKR_FLEX_QUERY_TRADES:-}
     volumes:
       - ./backend/cache:/app/cache
     depends_on:

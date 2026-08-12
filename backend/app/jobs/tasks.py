@@ -100,6 +100,12 @@ def _probe_cboe_optionable() -> dict[str, Any]:
     return CboeOptionableProvider().probe()
 
 
+def _probe_ibkr_flex() -> dict[str, Any]:
+    from ..providers.ibkr_flex import IbkrFlexBrokerProvider
+
+    return IbkrFlexBrokerProvider().probe()
+
+
 def refresh_provider_status() -> list[dict[str, Any]]:
     """Verifica los proveedores activos. Los de fases futuras no se prueban aún."""
     return [
@@ -107,6 +113,7 @@ def refresh_provider_status() -> list[dict[str, Any]]:
         check_provider("sec_edgar", _probe_sec),
         check_provider("nasdaq_trader", _probe_nasdaq_trader),
         check_provider("cboe_symbol_directory", _probe_cboe_optionable),
+        check_provider("ibkr_flex", _probe_ibkr_flex),
     ]
 
 

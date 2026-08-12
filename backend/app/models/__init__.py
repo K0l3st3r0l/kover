@@ -25,6 +25,7 @@ from .campaign import (
     CycleStatus,
 )
 from .market_risk import MarketRiskSnapshot, StockDailyBar
+from .broker_sync import BrokerSyncRun
 
 __all__ = [
     "Stock",
@@ -57,4 +58,5 @@ __all__ = [
     "SecFiling",
     "MarketRiskSnapshot",
     "StockDailyBar",
+    "BrokerSyncRun",
 ]
