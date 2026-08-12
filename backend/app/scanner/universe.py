@@ -35,9 +35,14 @@ AVG_DAILY_VOLUME_MIN = 500_000
 AVG_DOLLAR_VOLUME_MIN = 10_000_000
 
 CHUNK_SIZE = 150
-OPTIONABLE_CHECK_DELAY = 0.4  # segundos entre checks secuenciales, buena vecindad con Yahoo
+OPTIONABLE_CHECK_DELAY = 0.6  # segundos entre checks secuenciales, buena vecindad con Yahoo
 OPTIONABLE_MAX_RETRIES = 2
 OPTIONABLE_RETRY_BACKOFF = (1.0, 3.0)
+# Cuánto dura una confirmación de optionabilidad antes de volver a chequearla.
+# No es una cotización: qué acciones tienen opciones listadas cambia rara vez,
+# así que re-preguntar todos los días es puro volumen desperdiciado — y fue
+# exactamente eso lo que gatilló el rate limit de la primera corrida real.
+OPTIONABLE_CACHE_TTL_DAYS = 21
 # Yahoo rate-limitea después de un par de cientos de requests seguidos en esta
 # franja. Seguir insistiendo no ayuda —el bloqueo dura minutos, no segundos—,
 # así que ante N fallos consecutivos se corta la pasada: lo que falta queda
@@ -67,6 +72,7 @@ class UniverseCandidate:
     avg_daily_volume_20: Optional[float] = None
     avg_dollar_volume_20: Optional[float] = None
     is_optionable: Optional[bool] = None
+    optionable_from_cache: bool = False
 
     @property
     def qualified(self) -> bool:
@@ -85,6 +91,7 @@ class UniverseFunnelCounts:
     price_out_of_range: int = 0
     price_in_range: int = 0
     low_volume: int = 0
+    optionable_cached: int = 0
     optionable_checked: int = 0
     not_optionable: int = 0
     optionable_check_failed: int = 0
@@ -202,6 +209,7 @@ def run_universe_scan(
     avg_volume_min: float = AVG_DAILY_VOLUME_MIN,
     avg_dollar_volume_min: float = AVG_DOLLAR_VOLUME_MIN,
     check_optionable: bool = True,
+    known_optionable: Optional[dict[str, bool]] = None,
 ) -> tuple[list[UniverseCandidate], UniverseFunnelCounts]:
     listings, counts = _filter_listing(provider)
     listing_by_symbol = {l.symbol: l for l in listings}
@@ -247,9 +255,23 @@ def run_universe_scan(
     if not check_optionable:
         return all_candidates, counts
 
+    known_optionable = known_optionable or {}
     consecutive_failures = 0
     breaker_tripped = False
     for candidate in liquid:
+        if candidate.symbol in known_optionable:
+            cached_value = known_optionable[candidate.symbol]
+            candidate.is_optionable = cached_value
+            candidate.optionable_from_cache = True
+            candidate.stage_reached = STAGE_OPTIONABLE
+            counts.optionable_cached += 1
+            if cached_value:
+                counts.qualified += 1
+            else:
+                candidate.rejected_reason = REASON_NOT_OPTIONABLE
+                counts.not_optionable += 1
+            continue
+
         if breaker_tripped:
             candidate.stage_reached = STAGE_LIQUIDITY
             candidate.rejected_reason = REASON_OPTIONABLE_CHECK_FAILED

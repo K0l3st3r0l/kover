@@ -30,6 +30,10 @@ class Instrument(Base):
     instrument_type = Column(String(32), default="STOCK")
 
     is_optionable = Column(Boolean, nullable=True)
+    # Cuándo se confirmó `is_optionable` con una respuesta real de Yahoo (no un
+    # rate limit). El scanner reusa este valor mientras esté fresco en vez de
+    # volver a preguntar — optionabilidad casi nunca cambia día a día.
+    optionable_checked_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
 
     # Estado vigente en el universo del scanner (Stage 1). Se sobrescribe en

@@ -15,7 +15,7 @@ listado?", no una cotización.
 from __future__ import annotations
 
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 import pandas as pd
@@ -27,6 +27,7 @@ from ..models import AppSetting, Instrument, MarketRiskSnapshot, StockDailyBar
 from ..providers.nasdaq_universe import NasdaqUniverseProvider
 from .market_risk import Bar, compute_market_safety_score, compute_metrics
 from .universe import (
+    OPTIONABLE_CACHE_TTL_DAYS,
     REASON_OPTIONABLE_CHECK_FAILED,
     STAGE_LIQUIDITY,
     STAGE_OPTIONABLE,
@@ -69,12 +70,29 @@ def _store_last_run(db: Session, summary: dict) -> None:
     db.commit()
 
 
+def _load_known_optionable(db: Session) -> dict[str, bool]:
+    """Símbolos con optionabilidad confirmada hace menos de `OPTIONABLE_CACHE_TTL_DAYS`.
+
+    No preguntarle a Yahoo lo que ya se sabe es lo que evita el rate limit —no
+    solo espaciar los requests, que ya se intentó y no alcanzó (ver
+    wiki/projects/kover/bugs/scanner-rate-limit-false-not-optionable.md).
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=OPTIONABLE_CACHE_TTL_DAYS)
+    rows = (
+        db.query(Instrument.symbol, Instrument.is_optionable)
+        .filter(Instrument.is_optionable.isnot(None), Instrument.optionable_checked_at >= cutoff)
+        .all()
+    )
+    return {symbol: is_optionable for symbol, is_optionable in rows}
+
+
 def _get_or_create_instruments(db: Session, candidates: list[UniverseCandidate]) -> dict[str, Instrument]:
     symbols = [c.symbol for c in candidates]
     existing = {
         i.symbol: i
         for i in db.query(Instrument).filter(Instrument.symbol.in_(symbols)).all()
     }
+    now = datetime.now(timezone.utc)
     for candidate in candidates:
         instrument = existing.get(candidate.symbol)
         if instrument is None:
@@ -88,6 +106,12 @@ def _get_or_create_instruments(db: Session, candidates: list[UniverseCandidate])
         instrument.is_active = True
         if candidate.is_optionable is not None:
             instrument.is_optionable = candidate.is_optionable
+            # Solo una confirmación EN VIVO reinicia el reloj del caché. Un hit
+            # de caché ya viene de un `optionable_checked_at` vigente — tocarlo
+            # de nuevo no aportaría nada y complicaría leer cuándo se confirmó
+            # de verdad por última vez.
+            if not candidate.optionable_from_cache:
+                instrument.optionable_checked_at = now
     db.flush()
     return existing
 
@@ -230,7 +254,10 @@ def run(db: Session, check_optionable: bool = True) -> dict[str, Any]:
     try:
         with LogContext(job_id="universe_scan"):
             provider = NasdaqUniverseProvider()
-            candidates, counts = run_universe_scan(provider, check_optionable=check_optionable)
+            known_optionable = _load_known_optionable(db) if check_optionable else {}
+            candidates, counts = run_universe_scan(
+                provider, check_optionable=check_optionable, known_optionable=known_optionable
+            )
 
             instruments = _get_or_create_instruments(db, candidates)
             db.commit()

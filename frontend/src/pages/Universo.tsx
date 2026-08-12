@@ -14,6 +14,7 @@ interface FunnelCounts {
   price_out_of_range: number
   price_in_range: number
   low_volume: number
+  optionable_cached: number
   optionable_checked: number
   not_optionable: number
   optionable_check_failed: number
@@ -139,11 +140,11 @@ function Funnel({ run }: { run: LastRun }) {
           label="Optionable"
           value={f.qualified}
           of={f.price_in_range - f.low_volume || 1}
-          hint={
-            f.optionable_check_failed > 0
-              ? `−${f.not_optionable} sin opciones, ${f.optionable_check_failed} pendientes de verificar`
-              : `−${f.not_optionable} sin opciones`
-          }
+          hint={[
+            `−${f.not_optionable} sin opciones`,
+            f.optionable_cached > 0 ? `${f.optionable_cached} desde caché` : null,
+            f.optionable_check_failed > 0 ? `${f.optionable_check_failed} pendientes de verificar` : null,
+          ].filter(Boolean).join(', ')}
         />
       </div>
       {f.optionable_check_failed > 0 && (

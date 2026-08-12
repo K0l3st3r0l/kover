@@ -154,6 +154,41 @@ class TestRunUniverseScan:
         assert counts.not_optionable == 0
         assert counts.qualified == 0
 
+    def test_known_optionable_skips_live_check(self, monkeypatch):
+        """No preguntarle a Yahoo lo que ya se sabe: eso es lo que evita el rate limit."""
+        listings = [listing("INRG"), listing("NOOPT")]
+        provider = FakeProvider(listings)
+        price_data = {
+            "INRG": {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000},
+            "NOOPT": {"price": 18.0, "avg_volume": 800_000, "avg_dollar_volume": 14_000_000},
+        }
+        monkeypatch.setattr(scanner_universe, "_fetch_price_volume_batch", lambda symbols: price_data)
+        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
+
+        called = []
+
+        def unexpected_live_check(symbol):
+            called.append(symbol)
+            return True
+
+        monkeypatch.setattr(scanner_universe, "_check_optionable", unexpected_live_check)
+
+        candidates, counts = run_universe_scan(
+            provider, known_optionable={"INRG": True, "NOOPT": False}
+        )
+        by_symbol = {c.symbol: c for c in candidates}
+
+        assert called == []  # ningún request en vivo: ambos vinieron del caché
+        assert counts.optionable_cached == 2
+        assert counts.optionable_checked == 0
+        assert counts.qualified == 1
+        assert counts.not_optionable == 1
+
+        assert by_symbol["INRG"].qualified is True
+        assert by_symbol["INRG"].optionable_from_cache is True
+        assert by_symbol["NOOPT"].rejected_reason == REASON_NOT_OPTIONABLE
+        assert by_symbol["NOOPT"].optionable_from_cache is True
+
     def test_circuit_breaker_stops_hammering_after_consecutive_failures(self, monkeypatch):
         total = OPTIONABLE_CIRCUIT_BREAKER + 5
         listings = [listing(f"SY{chr(65 + i)}") for i in range(total)]  # SYA, SYB, … (alpha-only)
