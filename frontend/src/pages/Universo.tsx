@@ -14,7 +14,6 @@ interface FunnelCounts {
   price_out_of_range: number
   price_in_range: number
   low_volume: number
-  optionable_cached: number
   optionable_checked: number
   not_optionable: number
   optionable_check_failed: number
@@ -140,21 +139,21 @@ function Funnel({ run }: { run: LastRun }) {
           label="Optionable"
           value={f.qualified}
           of={f.price_in_range - f.low_volume || 1}
-          hint={[
-            `−${f.not_optionable} sin opciones`,
-            f.optionable_cached > 0 ? `${f.optionable_cached} desde caché` : null,
-            f.optionable_check_failed > 0 ? `${f.optionable_check_failed} pendientes de verificar` : null,
-          ].filter(Boolean).join(', ')}
+          hint={
+            f.optionable_check_failed > 0
+              ? `${f.optionable_check_failed} pendientes de verificar`
+              : `−${f.not_optionable} sin opciones (según directorio CBOE)`
+          }
         />
       </div>
       {f.optionable_check_failed > 0 && (
         <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-300 rounded-lg px-3 py-2.5 text-sm">
           <span className="mt-0.5">⚠️</span>
           <span>
-            <strong>{f.optionable_check_failed.toLocaleString('en-US')} candidatos con liquidez suficiente quedaron sin
-            verificar</strong> — Yahoo empezó a rate-limitar el chequeo de opciones a mitad de la corrida. No están
-            descartados: se reintentan solos en la próxima corrida (job diario 05:45 ET) o con "Correr ahora" más tarde.
-            El "Optionable" de arriba solo cuenta lo que sí se pudo confirmar.
+            <strong>No se pudo descargar el directorio de símbolos de CBOE en esta corrida</strong> — los{' '}
+            {f.optionable_check_failed.toLocaleString('en-US')} candidatos con liquidez suficiente quedaron sin
+            verificar. No están descartados: se reintenta solo en la próxima corrida (job diario 05:45 ET) o con
+            "Correr ahora" más tarde.
           </span>
         </div>
       )}

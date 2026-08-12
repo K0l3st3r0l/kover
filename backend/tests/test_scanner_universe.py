@@ -1,17 +1,16 @@
 """Tests de Stage 1 (universo). Sin red: el fetch de precios/volumen y el
-check de optionabilidad se reemplazan por dobles inyectados vía monkeypatch.
+directorio de optionabilidad de CBOE se reemplazan por dobles inyectados.
 """
 
+from app.providers.base import ProviderError
 from app.providers.nasdaq_universe import NasdaqListing
 from app.scanner import universe as scanner_universe
 from app.scanner.universe import (
-    OPTIONABLE_CIRCUIT_BREAKER,
     REASON_LOW_VOLUME,
     REASON_NOT_OPTIONABLE,
     REASON_OPTIONABLE_CHECK_FAILED,
     STAGE_LIQUIDITY,
     STAGE_OPTIONABLE,
-    STAGE_PRICE_RANGE,
     run_universe_scan,
 )
 
@@ -33,6 +32,17 @@ class FakeProvider:
 
     def get_listings(self):
         return self._listings
+
+
+class FakeOptionableProvider:
+    def __init__(self, symbols=None, error=None):
+        self._symbols = symbols or set()
+        self._error = error
+
+    def get_optionable_symbols(self):
+        if self._error:
+            raise self._error
+        return self._symbols
 
 
 class TestNasdaqListingHeuristic:
@@ -73,9 +83,9 @@ class TestFilterListing:
 class TestRunUniverseScan:
     def test_full_funnel_with_stubbed_price_and_optionability(self, monkeypatch):
         listings = [
-            listing("INRG"),   # precio ok, volumen ok, optionable -> califica
+            listing("INRG"),   # precio ok, volumen ok, en el directorio CBOE -> califica
             listing("ILLQ"),  # precio ok, volumen bajo -> se cae en liquidez
-            listing("NOOPT"),     # precio ok, volumen ok, sin opciones
+            listing("NOOPT"),     # precio ok, volumen ok, no está en CBOE
             listing("CHEAP"),     # precio fuera de banda (muy bajo)
             listing("NODAT"),    # sin datos de precio
         ]
@@ -88,11 +98,10 @@ class TestRunUniverseScan:
             "CHEAP": {"price": 3.0, "avg_volume": 5_000_000, "avg_dollar_volume": 15_000_000},
         }
         monkeypatch.setattr(scanner_universe, "_fetch_price_volume_batch", lambda symbols: price_data)
-        monkeypatch.setattr(
-            scanner_universe, "_check_optionable", lambda symbol: symbol != "NOOPT"
-        )
 
-        candidates, counts = run_universe_scan(provider)
+        candidates, counts = run_universe_scan(
+            provider, optionable_provider=FakeOptionableProvider({"INRG"})
+        )
         by_symbol = {c.symbol: c for c in candidates}
 
         assert counts.listing_passed == 5
@@ -126,16 +135,18 @@ class TestRunUniverseScan:
             "_fetch_price_volume_batch",
             lambda symbols: {"INRG": {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000}},
         )
-        called = []
-        monkeypatch.setattr(scanner_universe, "_check_optionable", lambda s: called.append(s) or True)
 
-        candidates, counts = run_universe_scan(provider, check_optionable=False)
-        assert called == []
+        fetched = []
+        provider_double = FakeOptionableProvider({"INRG"})
+        provider_double.get_optionable_symbols = lambda: fetched.append(1) or {"INRG"}
+
+        candidates, counts = run_universe_scan(provider, check_optionable=False, optionable_provider=provider_double)
+        assert fetched == []  # el provider ni se llama si check_optionable=False
         assert candidates[0].stage_reached == STAGE_LIQUIDITY
         assert candidates[0].rejected_reason is None
 
-    def test_optionable_check_failure_is_pending_not_rejected(self, monkeypatch):
-        """None (rate limit / red) no es lo mismo que False (confirmado sin opciones)."""
+    def test_cboe_provider_failure_leaves_candidates_pending_not_rejected(self, monkeypatch):
+        """Un solo request que falla no debe volverse 'confirmado sin opciones'."""
         listings = [listing("INRG")]
         provider = FakeProvider(listings)
         monkeypatch.setattr(
@@ -143,73 +154,39 @@ class TestRunUniverseScan:
             "_fetch_price_volume_batch",
             lambda symbols: {"INRG": {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000}},
         )
-        monkeypatch.setattr(scanner_universe, "_check_optionable", lambda s: None)
-        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
 
-        candidates, counts = run_universe_scan(provider)
+        candidates, counts = run_universe_scan(
+            provider,
+            optionable_provider=FakeOptionableProvider(error=ProviderError("cboe_symbol_directory", "caído")),
+        )
         assert candidates[0].stage_reached == STAGE_LIQUIDITY
         assert candidates[0].rejected_reason == REASON_OPTIONABLE_CHECK_FAILED
         assert candidates[0].is_optionable is None
         assert counts.optionable_check_failed == 1
-        assert counts.not_optionable == 0
         assert counts.qualified == 0
+        assert counts.not_optionable == 0
 
-    def test_known_optionable_skips_live_check(self, monkeypatch):
-        """No preguntarle a Yahoo lo que ya se sabe: eso es lo que evita el rate limit."""
-        listings = [listing("INRG"), listing("NOOPT")]
-        provider = FakeProvider(listings)
-        price_data = {
-            "INRG": {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000},
-            "NOOPT": {"price": 18.0, "avg_volume": 800_000, "avg_dollar_volume": 14_000_000},
-        }
-        monkeypatch.setattr(scanner_universe, "_fetch_price_volume_batch", lambda symbols: price_data)
-        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
-
-        called = []
-
-        def unexpected_live_check(symbol):
-            called.append(symbol)
-            return True
-
-        monkeypatch.setattr(scanner_universe, "_check_optionable", unexpected_live_check)
-
-        candidates, counts = run_universe_scan(
-            provider, known_optionable={"INRG": True, "NOOPT": False}
-        )
-        by_symbol = {c.symbol: c for c in candidates}
-
-        assert called == []  # ningún request en vivo: ambos vinieron del caché
-        assert counts.optionable_cached == 2
-        assert counts.optionable_checked == 0
-        assert counts.qualified == 1
-        assert counts.not_optionable == 1
-
-        assert by_symbol["INRG"].qualified is True
-        assert by_symbol["INRG"].optionable_from_cache is True
-        assert by_symbol["NOOPT"].rejected_reason == REASON_NOT_OPTIONABLE
-        assert by_symbol["NOOPT"].optionable_from_cache is True
-
-    def test_circuit_breaker_stops_hammering_after_consecutive_failures(self, monkeypatch):
-        total = OPTIONABLE_CIRCUIT_BREAKER + 5
-        listings = [listing(f"SY{chr(65 + i)}") for i in range(total)]  # SYA, SYB, … (alpha-only)
+    def test_single_request_covers_the_whole_liquid_pool(self, monkeypatch):
+        """El punto entero del cambio: un request de CBOE, no uno por símbolo."""
+        listings = [listing(f"SY{chr(65 + i)}") for i in range(20)]  # SYA..SYT
         provider = FakeProvider(listings)
         price_data = {
             l.symbol: {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000}
             for l in listings
         }
         monkeypatch.setattr(scanner_universe, "_fetch_price_volume_batch", lambda symbols: price_data)
-        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
 
         calls = []
 
-        def failing_check(symbol):
-            calls.append(symbol)
-            return None
+        class CountingProvider(FakeOptionableProvider):
+            def get_optionable_symbols(self):
+                calls.append(1)
+                return super().get_optionable_symbols()
 
-        monkeypatch.setattr(scanner_universe, "_check_optionable", failing_check)
-
-        candidates, counts = run_universe_scan(provider)
-        assert len(calls) == OPTIONABLE_CIRCUIT_BREAKER  # se corta, no sigue golpeando Yahoo
-        assert counts.optionable_check_failed == total
-        assert all(c.rejected_reason == REASON_OPTIONABLE_CHECK_FAILED for c in candidates)
-        assert all(c.stage_reached == STAGE_LIQUIDITY for c in candidates)
+        candidates, counts = run_universe_scan(
+            provider, optionable_provider=CountingProvider({l.symbol for l in listings[:10]})
+        )
+        assert len(calls) == 1
+        assert counts.optionable_checked == 20
+        assert counts.qualified == 10
+        assert counts.not_optionable == 10

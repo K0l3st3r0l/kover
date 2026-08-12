@@ -94,12 +94,19 @@ def _probe_nasdaq_trader() -> dict[str, Any]:
     return NasdaqUniverseProvider().probe()
 
 
+def _probe_cboe_optionable() -> dict[str, Any]:
+    from ..providers.cboe_optionable import CboeOptionableProvider
+
+    return CboeOptionableProvider().probe()
+
+
 def refresh_provider_status() -> list[dict[str, Any]]:
     """Verifica los proveedores activos. Los de fases futuras no se prueban aún."""
     return [
         check_provider("yfinance", _probe_yfinance),
         check_provider("sec_edgar", _probe_sec),
         check_provider("nasdaq_trader", _probe_nasdaq_trader),
+        check_provider("cboe_symbol_directory", _probe_cboe_optionable),
     ]
 
 

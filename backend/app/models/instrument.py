@@ -30,9 +30,9 @@ class Instrument(Base):
     instrument_type = Column(String(32), default="STOCK")
 
     is_optionable = Column(Boolean, nullable=True)
-    # Cuándo se confirmó `is_optionable` con una respuesta real de Yahoo (no un
-    # rate limit). El scanner reusa este valor mientras esté fresco en vez de
-    # volver a preguntar — optionabilidad casi nunca cambia día a día.
+    # Cuándo se confirmó `is_optionable` contra el directorio de símbolos de
+    # CBOE (ver app/providers/cboe_optionable.py). Se pisa en cada corrida del
+    # scanner; se conserva sobre todo para mostrar de cuándo es el dato.
     optionable_checked_at = Column(DateTime(timezone=True), nullable=True)
     is_active = Column(Boolean, default=True)
 

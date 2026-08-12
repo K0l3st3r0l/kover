@@ -7,8 +7,8 @@ Tres pasadas, cada una más cara que la anterior y sobre un conjunto más chico:
    preferentes, units). Miles → miles (no filtra por precio todavía).
 2. **Precio + liquidez** (yfinance en lotes de `CHUNK_SIZE`): precio en banda
    y volumen mínimo. Miles → decenas/cientos.
-3. **Optionabilidad** (yfinance, un request por sobreviviente): solo corre
-   sobre la salida de la pasada 2, que ya es chica.
+3. **Optionabilidad** (`CboeOptionableProvider`, un solo request): lookup
+   contra el directorio público de CBOE, no un request por símbolo.
 
 Los resultados fuera de la banda de precio o sin datos NO se persisten como
 `Instrument` — son la mayoría del listado y no aportan nada de vuelta al
@@ -19,13 +19,14 @@ usuario quiere ver el motivo exacto ("¿por qué no ANEB?").
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Optional
 
 import yfinance as yf
 
 from ..logging_config import get_logger
+from ..providers.base import ProviderError
+from ..providers.cboe_optionable import CboeOptionableProvider
 
 logger = get_logger(__name__)
 
@@ -35,19 +36,6 @@ AVG_DAILY_VOLUME_MIN = 500_000
 AVG_DOLLAR_VOLUME_MIN = 10_000_000
 
 CHUNK_SIZE = 150
-OPTIONABLE_CHECK_DELAY = 0.6  # segundos entre checks secuenciales, buena vecindad con Yahoo
-OPTIONABLE_MAX_RETRIES = 2
-OPTIONABLE_RETRY_BACKOFF = (1.0, 3.0)
-# Cuánto dura una confirmación de optionabilidad antes de volver a chequearla.
-# No es una cotización: qué acciones tienen opciones listadas cambia rara vez,
-# así que re-preguntar todos los días es puro volumen desperdiciado — y fue
-# exactamente eso lo que gatilló el rate limit de la primera corrida real.
-OPTIONABLE_CACHE_TTL_DAYS = 21
-# Yahoo rate-limitea después de un par de cientos de requests seguidos en esta
-# franja. Seguir insistiendo no ayuda —el bloqueo dura minutos, no segundos—,
-# así que ante N fallos consecutivos se corta la pasada: lo que falta queda
-# "sin verificar" para la corrida siguiente, no descartado a la fuerza.
-OPTIONABLE_CIRCUIT_BREAKER = 8
 
 STAGE_PRICE_RANGE = "PRICE_RANGE"
 STAGE_LIQUIDITY = "LIQUIDITY"
@@ -72,7 +60,6 @@ class UniverseCandidate:
     avg_daily_volume_20: Optional[float] = None
     avg_dollar_volume_20: Optional[float] = None
     is_optionable: Optional[bool] = None
-    optionable_from_cache: bool = False
 
     @property
     def qualified(self) -> bool:
@@ -91,7 +78,6 @@ class UniverseFunnelCounts:
     price_out_of_range: int = 0
     price_in_range: int = 0
     low_volume: int = 0
-    optionable_cached: int = 0
     optionable_checked: int = 0
     not_optionable: int = 0
     optionable_check_failed: int = 0
@@ -178,30 +164,6 @@ def _fetch_price_volume_batch(symbols: list[str]) -> dict[str, dict]:
     return result
 
 
-def _check_optionable(symbol: str) -> Optional[bool]:
-    """True/False si Yahoo respondió; None si el check falló (rate limit, red, etc.).
-
-    A propósito NO usa `MarketDataService.get_available_expirations`: ese método
-    atrapa cualquier excepción y devuelve `[]`, indistinguible de "confirmado sin
-    opciones". Un rate limit no es lo mismo que "esta acción no tiene calls" —
-    tratarlos igual marcaba candidatos válidos como NOT_OPTIONABLE para siempre.
-    """
-    last_error: Optional[Exception] = None
-    for attempt in range(OPTIONABLE_MAX_RETRIES + 1):
-        try:
-            expirations = yf.Ticker(symbol).options
-            return bool(expirations)
-        except Exception as exc:
-            last_error = exc
-            if attempt < OPTIONABLE_MAX_RETRIES:
-                time.sleep(OPTIONABLE_RETRY_BACKOFF[attempt])
-    logger.warning(
-        "check de optionabilidad falló tras reintentos",
-        extra={"symbol": symbol, "error": str(last_error)[:200]},
-    )
-    return None
-
-
 def run_universe_scan(
     provider,
     price_min: float = PRICE_MIN,
@@ -209,7 +171,7 @@ def run_universe_scan(
     avg_volume_min: float = AVG_DAILY_VOLUME_MIN,
     avg_dollar_volume_min: float = AVG_DOLLAR_VOLUME_MIN,
     check_optionable: bool = True,
-    known_optionable: Optional[dict[str, bool]] = None,
+    optionable_provider=None,
 ) -> tuple[list[UniverseCandidate], UniverseFunnelCounts]:
     listings, counts = _filter_listing(provider)
     listing_by_symbol = {l.symbol: l for l in listings}
@@ -255,55 +217,30 @@ def run_universe_scan(
     if not check_optionable:
         return all_candidates, counts
 
-    known_optionable = known_optionable or {}
-    consecutive_failures = 0
-    breaker_tripped = False
+    try:
+        optionable_symbols = (optionable_provider or CboeOptionableProvider()).get_optionable_symbols()
+    except ProviderError as exc:
+        # Un solo request que falla no debe convertir "no sabemos" en
+        # "no tiene opciones": toda la pasada queda pendiente, no rechazada.
+        logger.warning(
+            "no se pudo obtener el directorio de CBOE, optionabilidad queda pendiente",
+            extra={"error": str(exc)[:300]},
+        )
+        for candidate in liquid:
+            candidate.stage_reached = STAGE_LIQUIDITY
+            candidate.rejected_reason = REASON_OPTIONABLE_CHECK_FAILED
+            counts.optionable_check_failed += 1
+        return all_candidates, counts
+
     for candidate in liquid:
-        if candidate.symbol in known_optionable:
-            cached_value = known_optionable[candidate.symbol]
-            candidate.is_optionable = cached_value
-            candidate.optionable_from_cache = True
-            candidate.stage_reached = STAGE_OPTIONABLE
-            counts.optionable_cached += 1
-            if cached_value:
-                counts.qualified += 1
-            else:
-                candidate.rejected_reason = REASON_NOT_OPTIONABLE
-                counts.not_optionable += 1
-            continue
-
-        if breaker_tripped:
-            candidate.stage_reached = STAGE_LIQUIDITY
-            candidate.rejected_reason = REASON_OPTIONABLE_CHECK_FAILED
-            counts.optionable_check_failed += 1
-            continue
-
         counts.optionable_checked += 1
-        is_optionable = _check_optionable(candidate.symbol)
+        is_optionable = candidate.symbol in optionable_symbols
         candidate.is_optionable = is_optionable
-
-        if is_optionable is None:
-            # Stage no alcanzado de verdad: se queda en LIQUIDITY, pendiente de
-            # reintentar, no en OPTIONABLE con un resultado que nunca se confirmó.
-            candidate.stage_reached = STAGE_LIQUIDITY
-            candidate.rejected_reason = REASON_OPTIONABLE_CHECK_FAILED
-            counts.optionable_check_failed += 1
-            consecutive_failures += 1
-            if consecutive_failures >= OPTIONABLE_CIRCUIT_BREAKER:
-                breaker_tripped = True
-                logger.warning(
-                    "circuit breaker de optionabilidad activado: Yahoo parece estar "
-                    "rate-limitando, se corta la pasada y el resto queda pendiente",
-                    extra={"consecutive_failures": consecutive_failures},
-                )
+        candidate.stage_reached = STAGE_OPTIONABLE
+        if is_optionable:
+            counts.qualified += 1
         else:
-            consecutive_failures = 0
-            candidate.stage_reached = STAGE_OPTIONABLE
-            if not is_optionable:
-                candidate.rejected_reason = REASON_NOT_OPTIONABLE
-                counts.not_optionable += 1
-            else:
-                counts.qualified += 1
-        time.sleep(OPTIONABLE_CHECK_DELAY)
+            candidate.rejected_reason = REASON_NOT_OPTIONABLE
+            counts.not_optionable += 1
 
     return all_candidates, counts
