@@ -5,8 +5,10 @@ check de optionabilidad se reemplazan por dobles inyectados vía monkeypatch.
 from app.providers.nasdaq_universe import NasdaqListing
 from app.scanner import universe as scanner_universe
 from app.scanner.universe import (
+    OPTIONABLE_CIRCUIT_BREAKER,
     REASON_LOW_VOLUME,
     REASON_NOT_OPTIONABLE,
+    REASON_OPTIONABLE_CHECK_FAILED,
     STAGE_LIQUIDITY,
     STAGE_OPTIONABLE,
     STAGE_PRICE_RANGE,
@@ -131,3 +133,48 @@ class TestRunUniverseScan:
         assert called == []
         assert candidates[0].stage_reached == STAGE_LIQUIDITY
         assert candidates[0].rejected_reason is None
+
+    def test_optionable_check_failure_is_pending_not_rejected(self, monkeypatch):
+        """None (rate limit / red) no es lo mismo que False (confirmado sin opciones)."""
+        listings = [listing("INRG")]
+        provider = FakeProvider(listings)
+        monkeypatch.setattr(
+            scanner_universe,
+            "_fetch_price_volume_batch",
+            lambda symbols: {"INRG": {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000}},
+        )
+        monkeypatch.setattr(scanner_universe, "_check_optionable", lambda s: None)
+        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
+
+        candidates, counts = run_universe_scan(provider)
+        assert candidates[0].stage_reached == STAGE_LIQUIDITY
+        assert candidates[0].rejected_reason == REASON_OPTIONABLE_CHECK_FAILED
+        assert candidates[0].is_optionable is None
+        assert counts.optionable_check_failed == 1
+        assert counts.not_optionable == 0
+        assert counts.qualified == 0
+
+    def test_circuit_breaker_stops_hammering_after_consecutive_failures(self, monkeypatch):
+        total = OPTIONABLE_CIRCUIT_BREAKER + 5
+        listings = [listing(f"SY{chr(65 + i)}") for i in range(total)]  # SYA, SYB, … (alpha-only)
+        provider = FakeProvider(listings)
+        price_data = {
+            l.symbol: {"price": 15.0, "avg_volume": 1_000_000, "avg_dollar_volume": 15_000_000}
+            for l in listings
+        }
+        monkeypatch.setattr(scanner_universe, "_fetch_price_volume_batch", lambda symbols: price_data)
+        monkeypatch.setattr(scanner_universe.time, "sleep", lambda s: None)
+
+        calls = []
+
+        def failing_check(symbol):
+            calls.append(symbol)
+            return None
+
+        monkeypatch.setattr(scanner_universe, "_check_optionable", failing_check)
+
+        candidates, counts = run_universe_scan(provider)
+        assert len(calls) == OPTIONABLE_CIRCUIT_BREAKER  # se corta, no sigue golpeando Yahoo
+        assert counts.optionable_check_failed == total
+        assert all(c.rejected_reason == REASON_OPTIONABLE_CHECK_FAILED for c in candidates)
+        assert all(c.stage_reached == STAGE_LIQUIDITY for c in candidates)

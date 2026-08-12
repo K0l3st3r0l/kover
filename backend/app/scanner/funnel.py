@@ -26,7 +26,13 @@ from ..market.market_data import MarketDataService
 from ..models import AppSetting, Instrument, MarketRiskSnapshot, StockDailyBar
 from ..providers.nasdaq_universe import NasdaqUniverseProvider
 from .market_risk import Bar, compute_market_safety_score, compute_metrics
-from .universe import STAGE_LIQUIDITY, STAGE_OPTIONABLE, UniverseCandidate, run_universe_scan
+from .universe import (
+    REASON_OPTIONABLE_CHECK_FAILED,
+    STAGE_LIQUIDITY,
+    STAGE_OPTIONABLE,
+    UniverseCandidate,
+    run_universe_scan,
+)
 
 logger = get_logger(__name__)
 
@@ -235,12 +241,14 @@ def run(db: Session, check_optionable: bool = True) -> dict[str, Any]:
             risk_failed: list[str] = []
             # Llegar a OPTIONABLE implica haber pasado liquidez, sin importar el
             # resultado del check de opciones; quedarse en LIQUIDITY sin motivo de
-            # rechazo es el caso check_optionable=False. Cualquier otra combinación
-            # (rejected_reason seteado en LIQUIDITY) no pasó el filtro de volumen.
+            # rechazo es el caso check_optionable=False, y con
+            # OPTIONABLE_CHECK_FAILED es un candidato válido cuyo check de opciones
+            # falló (rate limit) — igual vale la pena calcularle el riesgo de
+            # mercado. Cualquier otro rejected_reason en LIQUIDITY no pasó volumen.
             liquid_candidates = [
                 c for c in candidates
                 if c.stage_reached == STAGE_OPTIONABLE
-                or (c.stage_reached == STAGE_LIQUIDITY and c.rejected_reason is None)
+                or (c.stage_reached == STAGE_LIQUIDITY and c.rejected_reason in (None, REASON_OPTIONABLE_CHECK_FAILED))
             ]
             for candidate in liquid_candidates:
                 instrument = instruments[candidate.symbol]

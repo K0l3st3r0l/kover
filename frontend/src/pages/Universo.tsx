@@ -50,6 +50,7 @@ const REASON_LABEL: Record<string, string> = {
   LOW_VOLUME: 'volumen diario insuficiente',
   LOW_DOLLAR_VOLUME: 'volumen en dólares insuficiente',
   NOT_OPTIONABLE: 'sin opciones listadas',
+  OPTIONABLE_CHECK_FAILED: 'no se pudo verificar (reintenta la próxima corrida)',
 }
 
 const STAGE_LABEL: Record<string, string> = {
