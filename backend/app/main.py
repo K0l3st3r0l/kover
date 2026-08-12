@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
 from .logging_config import configure_logging, get_logger
-from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets, news, dividends, campaigns, data_health, fundamentals
+from .api import stocks, options, dashboard, market, auth, transactions, analytics, exports, watchlist, calculator, fiscal, import_ib, chilean_markets, news, dividends, campaigns, data_health, fundamentals, scanner
 from .jobs.scheduler import shutdown_scheduler, start_scheduler
 
 configure_logging()
@@ -47,6 +47,7 @@ app.include_router(dividends.router, prefix="/api/dividends", tags=["dividends"]
 app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(data_health.router, prefix="/api/data-health", tags=["data-health"])
 app.include_router(fundamentals.router, prefix="/api/instruments", tags=["fundamentals"])
+app.include_router(scanner.router, prefix="/api/scanner", tags=["scanner"])
 
 @app.on_event("startup")
 def _start_ai_committee_loop():

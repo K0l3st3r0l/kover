@@ -32,6 +32,13 @@ class Instrument(Base):
     is_optionable = Column(Boolean, nullable=True)
     is_active = Column(Boolean, default=True)
 
+    # Estado vigente en el universo del scanner (Stage 1). Se sobrescribe en
+    # cada corrida — a diferencia de fundamental_snapshots, no es histórico:
+    # solo importa si el instrumento califica HOY.
+    universe_stage = Column(String(32), nullable=True)
+    universe_rejected_reason = Column(String(64), nullable=True)
+    universe_checked_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

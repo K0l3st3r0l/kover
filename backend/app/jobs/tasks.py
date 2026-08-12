@@ -88,11 +88,18 @@ def _probe_sec() -> dict[str, Any]:
     return SecEdgarFundamentalsProvider().probe()
 
 
+def _probe_nasdaq_trader() -> dict[str, Any]:
+    from ..providers.nasdaq_universe import NasdaqUniverseProvider
+
+    return NasdaqUniverseProvider().probe()
+
+
 def refresh_provider_status() -> list[dict[str, Any]]:
     """Verifica los proveedores activos. Los de fases futuras no se prueban aún."""
     return [
         check_provider("yfinance", _probe_yfinance),
         check_provider("sec_edgar", _probe_sec),
+        check_provider("nasdaq_trader", _probe_nasdaq_trader),
     ]
 
 
@@ -126,6 +133,23 @@ def refresh_fundamentals_for_holdings() -> dict[str, Any]:
                 failed.append({"symbol": symbol, "error": str(exc)[:300]})
                 logger.warning("fundamentales fallaron", extra={"ticker": symbol, "error": str(exc)[:300]})
         return {"updated": done, "failed": failed}
+    finally:
+        db.close()
+
+
+def run_universe_scan() -> dict[str, Any]:
+    """Stage 1 (universo $10–20 optionable) + Stage 3 (riesgo de mercado).
+
+    Corre antes que `fundamentals_refresh`: esa tarea todavía solo cubre
+    holdings + watchlist, pero el universo recién calculado es la lista
+    natural para extenderla en cuanto K3 esté validado en producción.
+    """
+    from ..scanner.funnel import run as run_funnel
+
+    db = SessionLocal()
+    try:
+        with LogContext(job_id="universe_scan"):
+            return run_funnel(db)
     finally:
         db.close()
 

@@ -24,6 +24,7 @@ from .campaign import (
     CoveredCallCycle,
     CycleStatus,
 )
+from .market_risk import MarketRiskSnapshot, StockDailyBar
 
 __all__ = [
     "Stock",
@@ -54,4 +55,6 @@ __all__ = [
     "RiskFlag",
     "ScoreStatus",
     "SecFiling",
+    "MarketRiskSnapshot",
+    "StockDailyBar",
 ]

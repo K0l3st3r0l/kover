@@ -86,6 +86,21 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         misfire_grace_time=7200,
     )
 
+    # Universo $10-20 optionable + riesgo de mercado (K3). Antes que
+    # fundamentals_refresh: deja el universo fresco por si esa tarea se
+    # extiende a cubrirlo más adelante. Puede tardar varios minutos (lote de
+    # precios + chequeo de optionabilidad + barras de 6 meses), por eso el
+    # misfire_grace_time generoso.
+    scheduler.add_job(
+        tasks.run_universe_scan,
+        CronTrigger(hour=5, minute=45, day_of_week="mon-fri", timezone=MARKET_TZ),
+        id="universe_scan",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=7200,
+    )
+
     scheduler.start()
     _scheduler = scheduler
     logger.info(
