@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useLocation } from 'react-router-dom'
 import { AuthProvider, useAuth } from './contexts/AuthContext'
 import { ThemeProvider, useTheme } from './contexts/ThemeContext'
@@ -69,6 +69,62 @@ function NavLink({ to, exact, label, onClick }: { to: string; exact?: boolean; l
   )
 }
 
+function MoreNavDropdown({ links }: { links: { to: string; label: string }[] }) {
+  const [open, setOpen] = useState(false)
+  const { pathname } = useLocation()
+  const ref = useRef<HTMLDivElement>(null)
+  const isActive = links.some(l => pathname.startsWith(l.to))
+
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleOutside)
+    return () => document.removeEventListener('mousedown', handleOutside)
+  }, [])
+
+  useEffect(() => { setOpen(false) }, [pathname])
+
+  return (
+    <div className="relative flex-shrink-0" ref={ref}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        className={`inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+          isActive
+            ? 'bg-blue-600 text-white shadow-sm'
+            : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/60 hover:text-gray-900 dark:hover:text-white'
+        }`}
+      >
+        Más
+        <svg className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute right-0 mt-1.5 w-52 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 shadow-lg z-50">
+          {links.map(l => {
+            const active = pathname.startsWith(l.to)
+            return (
+              <Link
+                key={l.to}
+                to={l.to}
+                onClick={() => setOpen(false)}
+                className={`flex items-center gap-2 px-3.5 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700/60'
+                }`}
+              >
+                {l.label}
+              </Link>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AppContent() {
   const { user, logout, isLoading } = useAuth()
   const { isDark, toggleTheme } = useTheme()
@@ -112,10 +168,16 @@ function AppContent() {
             </Link>
 
             {/* Desktop nav links */}
-            <div className="hidden md:flex items-center gap-0.5 flex-1 overflow-x-auto scrollbar-hide">
-              {NAV_LINKS.map(l => <NavLink key={l.to} {...l} />)}
+            <div className="hidden md:flex items-center gap-0.5 flex-1 min-w-0">
+              {/* Solo esta franja scrollea si algún día no cabe — el dropdown de
+                  abajo queda fuera a propósito: un ancestro con overflow-x
+                  (aunque no declare overflow-y) recorta hijos position:absolute
+                  que sobresalen verticalmente, invisibilizando el panel. */}
+              <div className="flex items-center gap-0.5 overflow-x-auto min-w-0">
+                {NAV_LINKS.map(l => <NavLink key={l.to} {...l} />)}
+              </div>
               <span className="w-px h-5 bg-gray-200 dark:bg-gray-700 mx-1 flex-shrink-0" />
-              {NAV_EXTRA.map(l => <NavLink key={l.to} to={l.to} label={l.label} />)}
+              <MoreNavDropdown links={NAV_EXTRA} />
             </div>
 
             {/* Right side */}
