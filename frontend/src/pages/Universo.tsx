@@ -16,6 +16,7 @@ interface FunnelCounts {
   low_volume: number
   optionable_checked: number
   not_optionable: number
+  optionable_check_failed: number
   qualified: number
 }
 
@@ -137,10 +138,25 @@ function Funnel({ run }: { run: LastRun }) {
         <FunnelStep
           label="Optionable"
           value={f.qualified}
-          of={f.optionable_checked || 1}
-          hint={`−${f.not_optionable} sin opciones`}
+          of={f.price_in_range - f.low_volume || 1}
+          hint={
+            f.optionable_check_failed > 0
+              ? `−${f.not_optionable} sin opciones, ${f.optionable_check_failed} pendientes de verificar`
+              : `−${f.not_optionable} sin opciones`
+          }
         />
       </div>
+      {f.optionable_check_failed > 0 && (
+        <div className="flex items-start gap-2 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-300 rounded-lg px-3 py-2.5 text-sm">
+          <span className="mt-0.5">⚠️</span>
+          <span>
+            <strong>{f.optionable_check_failed.toLocaleString('en-US')} candidatos con liquidez suficiente quedaron sin
+            verificar</strong> — Yahoo empezó a rate-limitar el chequeo de opciones a mitad de la corrida. No están
+            descartados: se reintentan solos en la próxima corrida (job diario 05:45 ET) o con "Correr ahora" más tarde.
+            El "Optionable" de arriba solo cuenta lo que sí se pudo confirmar.
+          </span>
+        </div>
+      )}
       <div className="pt-2 border-t border-gray-100 dark:border-gray-700 flex items-center justify-between text-sm">
         <span className="text-gray-500 dark:text-gray-400">Riesgo de mercado calculado</span>
         <span className="font-mono text-gray-900 dark:text-white">
