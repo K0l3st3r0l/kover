@@ -82,9 +82,52 @@ def _probe_yfinance() -> dict[str, Any]:
     return {"probe_symbol": "SPY", "price": price}
 
 
+def _probe_sec() -> dict[str, Any]:
+    from ..providers.sec_edgar import SecEdgarFundamentalsProvider
+
+    return SecEdgarFundamentalsProvider().probe()
+
+
 def refresh_provider_status() -> list[dict[str, Any]]:
     """Verifica los proveedores activos. Los de fases futuras no se prueban aún."""
-    return [check_provider("yfinance", _probe_yfinance)]
+    return [
+        check_provider("yfinance", _probe_yfinance),
+        check_provider("sec_edgar", _probe_sec),
+    ]
+
+
+def refresh_fundamentals_for_holdings() -> dict[str, Any]:
+    """Actualiza fundamentales de lo que el usuario tiene o vigila.
+
+    Antes de que exista el universo del scanner (K3), el conjunto relevante son
+    las posiciones abiertas y la watchlist.
+    """
+    from ..fundamentals.service import refresh_fundamentals
+    from ..models import Campaign, CampaignStatus, Watchlist
+
+    db = SessionLocal()
+    try:
+        symbols = {
+            row.ticker
+            for row in db.query(Campaign.ticker)
+            .filter(Campaign.status != CampaignStatus.CLOSED)
+            .distinct()
+        }
+        symbols |= {row.ticker for row in db.query(Watchlist.ticker).distinct()}
+
+        done, failed = [], []
+        for symbol in sorted(symbols):
+            try:
+                with LogContext(job_id="fundamentals_refresh", ticker=symbol):
+                    refresh_fundamentals(db, symbol)
+                done.append(symbol)
+            except Exception as exc:
+                db.rollback()
+                failed.append({"symbol": symbol, "error": str(exc)[:300]})
+                logger.warning("fundamentales fallaron", extra={"ticker": symbol, "error": str(exc)[:300]})
+        return {"updated": done, "failed": failed}
+    finally:
+        db.close()
 
 
 def rebuild_all_campaigns() -> dict[str, Any]:

@@ -73,6 +73,19 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         misfire_grace_time=3600,
     )
 
+    # Fundamentales: los filings se publican a lo largo del día, pero un
+    # refresco diario antes de la apertura alcanza. No se recargan durante la
+    # sesión: no cambian intradía.
+    scheduler.add_job(
+        tasks.refresh_fundamentals_for_holdings,
+        CronTrigger(hour=6, minute=15, day_of_week="mon-fri", timezone=MARKET_TZ),
+        id="fundamentals_refresh",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=7200,
+    )
+
     scheduler.start()
     _scheduler = scheduler
     logger.info(

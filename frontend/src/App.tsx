@@ -17,6 +17,7 @@ import News from './pages/News'
 import MacroCalendar from './pages/MacroCalendar'
 import Dividends from './pages/Dividends'
 import Campaigns from './pages/Campaigns'
+import Fundamentals from './pages/Fundamentals'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth()
@@ -40,6 +41,7 @@ const NAV_LINKS = [
   { to: '/calculator',   exact: false, label: 'Calculadora' },
 ]
 const NAV_EXTRA = [
+  { to: '/fundamentales', label: '🔎 Fundamentales' },
   { to: '/noticias',    label: '📰 Noticias' },
   { to: '/dividendos',  label: '💰 Dividendos' },
   { to: '/tax-report',  label: '🇨🇱 Fiscal' },
@@ -255,6 +257,7 @@ function AppContent() {
           <Route path="/noticias/calendario" element={<PrivateRoute><MacroCalendar /></PrivateRoute>} />
           <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
           <Route path="/campaigns"    element={<PrivateRoute><Campaigns /></PrivateRoute>} />
+          <Route path="/fundamentales" element={<PrivateRoute><Fundamentals /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>
       </main>

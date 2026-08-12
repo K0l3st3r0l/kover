@@ -5,6 +5,17 @@ from .watchlist import Watchlist
 from .user import User
 from .instrument import Instrument
 from .infra import AppSetting, DataProvenance, ProviderStatus
+from .fundamentals import (
+    CorporateEventRow,
+    FinancialFact,
+    FlagSeverity,
+    FundamentalProfile,
+    FundamentalRiskFlag,
+    FundamentalSnapshot,
+    RiskFlag,
+    ScoreStatus,
+    SecFiling,
+)
 from .campaign import (
     Campaign,
     CampaignCloseReason,
@@ -34,4 +45,13 @@ __all__ = [
     "CampaignStatus",
     "CoveredCallCycle",
     "CycleStatus",
+    "CorporateEventRow",
+    "FinancialFact",
+    "FlagSeverity",
+    "FundamentalProfile",
+    "FundamentalRiskFlag",
+    "FundamentalSnapshot",
+    "RiskFlag",
+    "ScoreStatus",
+    "SecFiling",
 ]
