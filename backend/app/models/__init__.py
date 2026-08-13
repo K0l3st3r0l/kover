@@ -26,6 +26,12 @@ from .campaign import (
 )
 from .market_risk import MarketRiskSnapshot, StockDailyBar
 from .broker_sync import BrokerSyncRun
+from .covered_call_candidate import (
+    PICK_BALANCED,
+    PICK_PREMIUM,
+    PICK_UPSIDE,
+    CoveredCallCandidate,
+)
 
 __all__ = [
     "Stock",
@@ -59,4 +65,8 @@ __all__ = [
     "MarketRiskSnapshot",
     "StockDailyBar",
     "BrokerSyncRun",
+    "CoveredCallCandidate",
+    "PICK_BALANCED",
+    "PICK_PREMIUM",
+    "PICK_UPSIDE",
 ]

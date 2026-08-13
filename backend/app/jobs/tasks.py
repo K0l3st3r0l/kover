@@ -151,6 +151,93 @@ def refresh_fundamentals_for_holdings() -> dict[str, Any]:
         db.close()
 
 
+# Cada símbolo del universo cuesta ~3 requests a SEC (submissions, companyfacts,
+# filings) y ~2.200 filas en financial_facts. Con 306 símbolos eso es una pasada
+# de varios minutos y ~300 MB de crecimiento — aceptable una vez, absurdo todos
+# los días. Los filings no cambian a diario: se revisita cada símbolo cada 7
+# días y cada corrida toma solo los más atrasados.
+UNIVERSE_FUNDAMENTALS_MAX_AGE_DAYS = 7
+UNIVERSE_FUNDAMENTALS_BATCH = 90
+
+
+def refresh_fundamentals_for_universe(
+    max_symbols: int = UNIVERSE_FUNDAMENTALS_BATCH,
+    max_age_days: int = UNIVERSE_FUNDAMENTALS_MAX_AGE_DAYS,
+) -> dict[str, Any]:
+    """Fundamentales del universo calificado, por lotes y sin escanear filings.
+
+    Complementa a `refresh_fundamentals_for_holdings`, que sigue cubriendo
+    holdings + watchlist con `scan_text=True`. Acá el escaneo de texto va
+    apagado a propósito: es la parte cara (descarga el 10-K/10-Q completo por
+    símbolo) y solo aporta los hard flags de tipo FILING_TEXT. Los flags METRIC
+    —runway, patrimonio negativo, dilución— se calculan igual, que es lo que
+    necesita la puerta fundamental del scanner para no dejar pasar una empresa
+    al borde del abismo.
+
+    Sin esto la columna "Financial Safety" de /universo dice PENDING en las 306
+    filas: el funnel solo lee el snapshot más reciente, nunca lo fuerza.
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from ..fundamentals.service import refresh_fundamentals
+    from ..models import FundamentalSnapshot, Instrument
+    from ..scanner.universe import STAGE_OPTIONABLE
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        ultimo_snapshot = (
+            db.query(
+                FundamentalSnapshot.instrument_id.label("instrument_id"),
+                func.max(FundamentalSnapshot.created_at).label("ultimo"),
+            )
+            .group_by(FundamentalSnapshot.instrument_id)
+            .subquery()
+        )
+
+        pendientes = (
+            db.query(Instrument.symbol)
+            .outerjoin(ultimo_snapshot, ultimo_snapshot.c.instrument_id == Instrument.id)
+            .filter(
+                Instrument.universe_stage == STAGE_OPTIONABLE,
+                Instrument.universe_rejected_reason.is_(None),
+            )
+            # NULLS FIRST: los que nunca se han calculado van antes que los
+            # que solo están vencidos.
+            .order_by(ultimo_snapshot.c.ultimo.asc().nullsfirst())
+            .filter(
+                (ultimo_snapshot.c.ultimo.is_(None)) | (ultimo_snapshot.c.ultimo < cutoff)
+            )
+            .limit(max_symbols)
+            .all()
+        )
+
+        symbols = [row.symbol for row in pendientes]
+        done, failed = [], []
+        for symbol in symbols:
+            try:
+                with LogContext(job_id="fundamentals_universe", ticker=symbol):
+                    refresh_fundamentals(db, symbol, scan_text=False)
+                done.append(symbol)
+            except Exception as exc:
+                db.rollback()
+                failed.append({"symbol": symbol, "error": str(exc)[:300]})
+                logger.warning(
+                    "fundamentales de universo fallaron",
+                    extra={"ticker": symbol, "error": str(exc)[:300]},
+                )
+
+        logger.info(
+            "fundamentales de universo",
+            extra={"pedidos": len(symbols), "ok": len(done), "fallidos": len(failed)},
+        )
+        return {"requested": len(symbols), "updated": done, "failed": failed}
+    finally:
+        db.close()
+
+
 def run_universe_scan() -> dict[str, Any]:
     """Stage 1 (universo $10–20 optionable) + Stage 3 (riesgo de mercado).
 
@@ -164,6 +251,18 @@ def run_universe_scan() -> dict[str, Any]:
     try:
         with LogContext(job_id="universe_scan"):
             return run_funnel(db)
+    finally:
+        db.close()
+
+
+def run_covered_call_scan() -> dict[str, Any]:
+    """K4: cadenas reales de CBOE sobre el universo calificado."""
+    from ..scanner import cc_scan
+
+    db = SessionLocal()
+    try:
+        with LogContext(job_id="covered_call_scan"):
+            return cc_scan.run(db)
     finally:
         db.close()
 

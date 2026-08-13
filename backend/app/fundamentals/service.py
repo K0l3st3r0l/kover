@@ -60,12 +60,21 @@ def _store_filings(
     db: Session, instrument: Instrument, provider: SecEdgarFundamentalsProvider
 ) -> list[SecFiling]:
     filings = provider.get_filings(instrument.sec_cik, forms=["10-K", "10-Q", "8-K"], limit=40)
+    # La existencia se chequea por accession_no GLOBAL, no por instrumento: el
+    # número de acceso identifica un filing ante la SEC y pertenece al CIK, no
+    # al símbolo. Dos clases de acción de la misma empresa (LBTYA/LBTYK,
+    # BRK.A/BRK.B) comparten CIK y por lo tanto comparten filings — filtrando
+    # por instrument_id el segundo símbolo intentaba insertarlos de nuevo y
+    # chocaba contra el UNIQUE de sec_filings.accession_no. Encontrado al
+    # extender los fundamentales al universo: 301 de 302 símbolos pasaron y el
+    # único fallo fue exactamente ese choque.
+    accession_nos = [f.accession_no for f in filings]
     existing = {
-        f.accession_no
-        for f in db.query(SecFiling.accession_no)
-        .filter(SecFiling.instrument_id == instrument.id)
+        row.accession_no
+        for row in db.query(SecFiling.accession_no)
+        .filter(SecFiling.accession_no.in_(accession_nos))
         .all()
-    }
+    } if accession_nos else set()
     stored: list[SecFiling] = []
     for filing in filings:
         if filing.accession_no in existing:
@@ -83,9 +92,18 @@ def _store_filings(
         db.add(row)
         stored.append(row)
     db.flush()
+    # Se devuelven los filings de todos los instrumentos que comparten el CIK,
+    # por la misma razón: si la clase A ya los guardó, la clase K tiene que
+    # verlos igual. Filtrar por instrument_id le dejaría la lista vacía y el
+    # snapshot se quedaría sin `source_filing_id` ni texto que escanear, en
+    # silencio.
+    hermanos = [
+        row.id
+        for row in db.query(Instrument.id).filter(Instrument.sec_cik == instrument.sec_cik).all()
+    ] if instrument.sec_cik else [instrument.id]
     return (
         db.query(SecFiling)
-        .filter(SecFiling.instrument_id == instrument.id)
+        .filter(SecFiling.instrument_id.in_(hermanos or [instrument.id]))
         .order_by(SecFiling.accepted_at.desc())
         .all()
     )

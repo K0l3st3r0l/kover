@@ -19,6 +19,7 @@ import Dividends from './pages/Dividends'
 import Campaigns from './pages/Campaigns'
 import Fundamentals from './pages/Fundamentals'
 import Universo from './pages/Universo'
+import CoveredCalls from './pages/CoveredCalls'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth()
@@ -42,6 +43,7 @@ const NAV_LINKS = [
   { to: '/calculator',   exact: false, label: 'Calculadora' },
 ]
 const NAV_EXTRA = [
+  { to: '/covered-calls', label: '🎯 Covered Calls' },
   { to: '/universo',      label: '🔭 Universo' },
   { to: '/fundamentales', label: '🔎 Fundamentales' },
   { to: '/noticias',    label: '📰 Noticias' },
@@ -322,6 +324,7 @@ function AppContent() {
           <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
           <Route path="/campaigns"    element={<PrivateRoute><Campaigns /></PrivateRoute>} />
           <Route path="/fundamentales" element={<PrivateRoute><Fundamentals /></PrivateRoute>} />
+          <Route path="/covered-calls" element={<PrivateRoute><CoveredCalls /></PrivateRoute>} />
           <Route path="/universo"      element={<PrivateRoute><Universo /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>

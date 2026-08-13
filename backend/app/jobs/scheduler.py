@@ -101,6 +101,36 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         misfire_grace_time=7200,
     )
 
+    # Fundamentales del universo, por lotes. Después de fundamentals_refresh
+    # (que cubre holdings + watchlist con escaneo de filings) para que lo del
+    # usuario tenga prioridad si SEC anda lento. Un lote diario de 90 recorre
+    # los ~306 calificados en 4 días, que es el ritmo al que cambian los
+    # filings — no hay nada que ganar pidiéndolos todos cada mañana.
+    scheduler.add_job(
+        tasks.refresh_fundamentals_for_universe,
+        CronTrigger(hour=6, minute=45, day_of_week="mon-fri", timezone=MARKET_TZ),
+        id="fundamentals_universe",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=7200,
+    )
+
+    # Scanner de covered calls (K4). Con el mercado abierto: las primas son el
+    # único dato de todo el stack que caduca en minutos. Dos pasadas alcanzan —
+    # la cotización de CBOE ya viene con ~15 min de delay, así que perseguir el
+    # tick no aporta nada, y la decisión de vender una call a 3 semanas no se
+    # toma por lo que hizo el spread a las 11:07.
+    scheduler.add_job(
+        tasks.run_covered_call_scan,
+        CronTrigger(hour="10,15", minute=15, day_of_week="mon-fri", timezone=MARKET_TZ),
+        id="covered_call_scan",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+
     scheduler.start()
     _scheduler = scheduler
     logger.info(

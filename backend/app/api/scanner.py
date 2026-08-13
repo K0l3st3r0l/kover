@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
 from ..logging_config import get_logger
-from ..models import Instrument, MarketRiskSnapshot, User
+from ..models import CoveredCallCandidate, Instrument, MarketRiskSnapshot, User
 from ..models.fundamentals import FundamentalSnapshot
-from ..scanner import funnel
+from ..scanner import cc_scan, funnel
 from ..utils.auth import get_current_user
 
 router = APIRouter()
@@ -189,4 +189,128 @@ async def get_universe_detail(
             if fund
             else {"score_status": "PENDING", "note": f"usa POST /api/instruments/{instrument.symbol}/fundamentals/refresh"}
         ),
+    }
+
+
+# ─── K4: scanner de covered calls ─────────────────────────────────────────────
+
+
+def _run_cc_scan_in_background(symbols: Optional[list[str]] = None) -> None:
+    db = SessionLocal()
+    try:
+        cc_scan.run(db, symbols=symbols)
+    except Exception as exc:
+        logger.warning("scan de covered calls en background falló", extra={"error": str(exc)[:300]})
+    finally:
+        db.close()
+
+
+@router.post("/covered-calls/run")
+async def trigger_covered_call_scan(
+    background_tasks: BackgroundTasks,
+    symbols: Optional[str] = Query(None, description="lista separada por comas; por defecto, el universo calificado"),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if cc_scan.is_running():
+        return {"status": "ALREADY_RUNNING"}
+    lista = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
+    background_tasks.add_task(_run_cc_scan_in_background, lista)
+    return {"status": "STARTED", "symbols": lista or "universo calificado"}
+
+
+@router.get("/covered-calls/status")
+async def covered_call_scan_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    return {"running": cc_scan.is_running(), "last_run": cc_scan.get_last_run(db)}
+
+
+@router.get("/covered-calls")
+async def list_covered_call_candidates(
+    pick_type: str = Query("BALANCED", description="BALANCED | PREMIUM | UPSIDE"),
+    min_financial_safety: Optional[float] = Query(None, ge=0, le=100),
+    min_market_safety: Optional[float] = Query(None, ge=0, le=100),
+    max_spread_pct: Optional[float] = Query(None, gt=0, description="fracción, no porcentaje: 0.12 = 12%"),
+    min_liquidity: Optional[float] = Query(None, ge=0, le=100),
+    max_dte: Optional[int] = Query(None, ge=1),
+    order_by: str = Query("annualized_premium_yield", description="annualized_premium_yield | annualized_return_if_assigned | liquidity_score"),
+    limit: int = Query(100, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Candidatos de la última corrida, filtrables.
+
+    Los filtros de seguridad son opcionales y por defecto vienen apagados: el
+    usuario decide su umbral. Pero las filas exponen `financial_safety_score`
+    en `null` cuando no hay snapshot, nunca en 0 — filtrar por `>= 45` no puede
+    dejar pasar un papel sin fundamentales solo porque su ausencia se veía como
+    cero. Ver la regla en wiki/projects/kover/decisions/fundamentales-sec-edgar.md.
+    """
+    columnas_validas = {
+        "annualized_premium_yield": CoveredCallCandidate.annualized_premium_yield,
+        "annualized_return_if_assigned": CoveredCallCandidate.annualized_return_if_assigned,
+        "liquidity_score": CoveredCallCandidate.liquidity_score,
+    }
+    if order_by not in columnas_validas:
+        raise HTTPException(status_code=400, detail=f"order_by inválido: {order_by}")
+
+    q = (
+        db.query(CoveredCallCandidate, Instrument)
+        .join(Instrument, Instrument.id == CoveredCallCandidate.instrument_id)
+        .filter(CoveredCallCandidate.pick_type == pick_type.upper())
+    )
+    if min_financial_safety is not None:
+        q = q.filter(CoveredCallCandidate.financial_safety_score >= min_financial_safety)
+    if min_market_safety is not None:
+        q = q.filter(CoveredCallCandidate.market_safety_score >= min_market_safety)
+    if max_spread_pct is not None:
+        q = q.filter(CoveredCallCandidate.spread_pct <= max_spread_pct)
+    if min_liquidity is not None:
+        q = q.filter(CoveredCallCandidate.liquidity_score >= min_liquidity)
+    if max_dte is not None:
+        q = q.filter(CoveredCallCandidate.dte <= max_dte)
+
+    filas = q.order_by(columnas_validas[order_by].desc().nullslast()).limit(limit).all()
+
+    def _f(value):
+        return float(value) if value is not None else None
+
+    return {
+        "pick_type": pick_type.upper(),
+        "count": len(filas),
+        "candidates": [
+            {
+                "symbol": inst.symbol,
+                "name": inst.name,
+                "occ_symbol": c.occ_symbol,
+                "expiration": c.expiration.isoformat(),
+                "strike": _f(c.strike),
+                "dte": c.dte,
+                "underlying_price": _f(c.underlying_price),
+                "stock_ask": _f(c.stock_ask),
+                "call_bid": _f(c.call_bid),
+                "call_ask": _f(c.call_ask),
+                "spread_pct": _f(c.spread_pct),
+                "delta": _f(c.delta),
+                "implied_volatility": _f(c.implied_volatility),
+                "volume": c.volume,
+                "open_interest": c.open_interest,
+                "premium_total": _f(c.premium_total),
+                "premium_yield": _f(c.premium_yield),
+                "annualized_premium_yield": _f(c.annualized_premium_yield),
+                "return_if_assigned": _f(c.return_if_assigned),
+                "annualized_return_if_assigned": _f(c.annualized_return_if_assigned),
+                "downside_protection": _f(c.downside_protection),
+                "breakeven": _f(c.breakeven),
+                "moneyness": _f(c.moneyness),
+                "liquidity_score": _f(c.liquidity_score),
+                "liquidity_components": c.liquidity_components,
+                "financial_safety_score": _f(c.financial_safety_score),
+                "market_safety_score": _f(c.market_safety_score),
+                "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of else None,
+                "scanned_at": c.scanned_at.isoformat() if c.scanned_at else None,
+            }
+            for c, inst in filas
+        ],
     }
