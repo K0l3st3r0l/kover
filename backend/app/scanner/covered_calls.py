@@ -21,10 +21,11 @@ from ..providers.base import OptionQuote
 
 CONTRACT_MULTIPLIER = 100
 
-# Ventana de vencimientos. Bajo 7 días la prima ya casi no compensa la comisión
-# y el riesgo de gap; sobre 60 el capital queda amarrado demasiado tiempo para
-# la rotación que busca la estrategia.
-DEFAULT_MIN_DTE = 7
+# Ventana de vencimientos. El piso es 5 y no 7 para que la ventana de los
+# perfiles balanceado y agresivo (5–10 días, §14 del plan) quede cubierta
+# entera: con min_dte=7 los contratos de 5 y 6 días nunca se evaluaban y esos
+# perfiles quedaban con tres días útiles de solapamiento.
+DEFAULT_MIN_DTE = 5
 DEFAULT_MAX_DTE = 60
 # Delta objetivo: la banda clásica de covered calls. Bajo 0,15 la prima no paga
 # el riesgo; sobre 0,45 la probabilidad de que te asignen deja de ser un efecto

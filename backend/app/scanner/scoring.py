@@ -48,8 +48,14 @@ MIN_POPULATION_FOR_PERCENTILES = 8
 # sigue siendo aceptable. Fuera de `*_HARD` el ajuste es 0.
 DELTA_IDEAL_LOW, DELTA_IDEAL_HIGH = 0.20, 0.35
 DELTA_HARD_LOW, DELTA_HARD_HIGH = 0.10, 0.50
-DTE_IDEAL_LOW, DTE_IDEAL_HIGH = 21, 45
-DTE_HARD_LOW, DTE_HARD_HIGH = 7, 75
+# Alineado con las ventanas de los perfiles (§14 del plan: 7–14 conservador,
+# 5–10 balanceado y agresivo). La primera versión usaba 21–45 —la preferencia
+# clásica de vender mensuales— y el resultado fue que el scan elegía como
+# "mejor" un contrato a 36 días que después TODOS los perfiles rechazaban por
+# DTE. Dos criterios peleando: el ranking apuntaba a mensuales y la puerta a
+# semanales. Manda el plan.
+DTE_IDEAL_LOW, DTE_IDEAL_HIGH = 7, 21
+DTE_HARD_LOW, DTE_HARD_HIGH = 3, 60
 
 FINAL_OK = "OK"
 FINAL_MISSING_FUNDAMENTAL = "MISSING_FUNDAMENTAL"
