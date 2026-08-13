@@ -42,12 +42,33 @@ from .base import BrokerCashTransaction, BrokerExecution, BrokerPositionLot, Pro
 
 logger = get_logger(__name__)
 
+
+class FlexCooldownError(ProviderError):
+    """ErrorCode 1001 — IBKR no regenera la misma query hasta que pase su cooldown.
+
+    Medido contra la cuenta real (2026-08-13): una corrida exitosa, y las
+    peticiones a los 2 y a los 16 minutos siguientes volvieron a fallar con
+    1001. No es un error de configuración ni algo que se arregle reintentando
+    dentro de la misma sesión — se distingue del resto justamente para que la
+    UI no invite a reintentar.
+    """
+
 SEND_REQUEST_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.SendRequest"
 GET_STATEMENT_URL = "https://gdcdyn.interactivebrokers.com/Universal/servlet/FlexStatementService.GetStatement"
 FLEX_VERSION = "3"
 STATEMENT_GENERATING_ERROR_CODE = "1019"
-POLL_BACKOFF_SECONDS = (5, 5, 10, 10, 20, 20)  # ~70s antes de rendirse
+STATEMENT_UNAVAILABLE_ERROR_CODE = "1001"
+POLL_BACKOFF_SECONDS = (5, 5, 10, 10, 20, 20)
 STATEMENT_CACHE_TTL_SECONDS = 120  # evita 3 GetStatement por la misma Activity query
+
+# Presupuesto total del ciclo SendRequest+GetStatement. Cloudflare corta la
+# conexión alrededor de los 100s (NPM permite 300s, pero manda el más chico),
+# así que agotar el backoff completo con timeouts largos daba un 524 al usuario
+# con el backend todavía trabajando. Mejor un error propio y claro dentro del
+# presupuesto que un corte del proxy sin explicación.
+STATEMENT_TOTAL_BUDGET_SECONDS = 85
+SEND_REQUEST_TIMEOUT_SECONDS = 20
+GET_STATEMENT_TIMEOUT_SECONDS = 25
 # Flex no reporta timezone explícito en ningún campo (ni AccountInformation ni
 # FlexStatement). Se asume la hora local de la cuenta, igual que todo el
 # historial ya cargado a mano desde el CSV (que tampoco trae offset).
@@ -88,7 +109,7 @@ class IbkrFlexBrokerProvider:
             resp = self._session.get(
                 SEND_REQUEST_URL,
                 params={"t": self._token, "q": query_id, "v": FLEX_VERSION},
-                timeout=30,
+                timeout=SEND_REQUEST_TIMEOUT_SECONDS,
             )
         except requests.RequestException as exc:
             raise ProviderError(self.name, f"error de red en SendRequest: {redact(str(exc))}") from exc
@@ -102,6 +123,15 @@ class IbkrFlexBrokerProvider:
         if status != "Success":
             error_code = root.findtext("ErrorCode") or "?"
             error_msg = root.findtext("ErrorMessage") or "sin detalle"
+            if error_code == STATEMENT_UNAVAILABLE_ERROR_CODE:
+                raise FlexCooldownError(
+                    self.name,
+                    "IBKR no puede generar el statement en este momento (ErrorCode 1001). "
+                    "Es el cooldown entre peticiones de la misma Flex Query, no un problema "
+                    "de configuración: reintentar dentro de la misma hora vuelve a fallar. "
+                    "Se destraba solo — el intento siguiente conviene hacerlo más tarde.",
+                    retryable=False,
+                )
             raise ProviderError(
                 self.name, f"SendRequest falló: status={status} code={error_code} {error_msg}", retryable=False
             )
@@ -111,16 +141,24 @@ class IbkrFlexBrokerProvider:
             raise ProviderError(self.name, "SendRequest sin ReferenceCode en la respuesta", retryable=False)
         return ref_code
 
-    def _get_statement(self, reference_code: str) -> str:
+    def _get_statement(self, reference_code: str, deadline: float) -> str:
         last_error_code = None
+        attempts = 0
         for attempt, wait in enumerate((0,) + POLL_BACKOFF_SECONDS):
+            # El presupuesto se chequea antes de dormir y antes de pedir: no
+            # sirve esperar 20s para después agotar el timeout igual.
+            remaining = deadline - time.monotonic()
+            if remaining <= wait + 1:
+                break
             if wait:
                 time.sleep(wait)
+
+            attempts += 1
             try:
                 resp = self._session.get(
                     GET_STATEMENT_URL,
                     params={"q": reference_code, "t": self._token, "v": FLEX_VERSION},
-                    timeout=60,
+                    timeout=min(GET_STATEMENT_TIMEOUT_SECONDS, max(deadline - time.monotonic(), 1)),
                 )
             except requests.RequestException as exc:
                 raise ProviderError(self.name, f"error de red en GetStatement: {redact(str(exc))}") from exc
@@ -149,8 +187,10 @@ class IbkrFlexBrokerProvider:
 
         raise ProviderError(
             self.name,
-            f"GetStatement no entregó el statement tras {len(POLL_BACKOFF_SECONDS) + 1} intentos "
-            f"(último ErrorCode: {last_error_code})",
+            f"IBKR aceptó la petición pero no entregó el statement dentro de "
+            f"{STATEMENT_TOTAL_BUDGET_SECONDS}s ({attempts} intentos, último ErrorCode: "
+            f"{last_error_code}). El statement puede seguir generándose del lado de IBKR: "
+            f"volver a intentar más tarde.",
         )
 
     def _fetch_statement_xml(self, query_id: str) -> str:
@@ -161,8 +201,9 @@ class IbkrFlexBrokerProvider:
                 return cached[1]
 
         self._require_config()
+        deadline = time.monotonic() + STATEMENT_TOTAL_BUDGET_SECONDS
         ref_code = self._send_request(query_id)
-        xml_text = self._get_statement(ref_code)
+        xml_text = self._get_statement(ref_code, deadline)
 
         with self._cache_lock:
             self._cache[query_id] = (time.monotonic(), xml_text)

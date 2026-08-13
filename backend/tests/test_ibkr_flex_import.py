@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models import Stock, User
 from app.providers.base import BrokerCashTransaction, BrokerExecution, BrokerPositionLot, ProviderError
-from app.providers.ibkr_flex import POLL_BACKOFF_SECONDS, IbkrFlexBrokerProvider
+from app.providers.ibkr_flex import POLL_BACKOFF_SECONDS, FlexCooldownError, IbkrFlexBrokerProvider
 import app.providers.ibkr_flex as ibkr_flex_module
 from app.api.import_ib import (
     broker_cash_to_raw_rows,
@@ -372,6 +372,13 @@ def statement_fail():
     )
 
 
+SEND_COOLDOWN = FakeResponse(
+    "<FlexStatementResponse><Status>Fail</Status><ErrorCode>1001</ErrorCode>"
+    "<ErrorMessage>Statement could not be generated at this time. Please try again shortly.</ErrorMessage>"
+    "</FlexStatementResponse>"
+)
+
+
 class IbkrFlexProviderTests(unittest.TestCase):
     def _provider(self, responses):
         session = FakeSession(responses)
@@ -437,6 +444,47 @@ class IbkrFlexProviderTests(unittest.TestCase):
         provider = IbkrFlexBrokerProvider(token="", query_id_activity="Q1", session=FakeSession([]))
         with self.assertRaises(ProviderError):
             provider.probe()
+
+    def test_cooldown_1001_is_its_own_error_type(self):
+        """El 1001 no es una falla del sync sino el límite de IBKR entre peticiones
+        de la misma query. Se distingue del resto para que el endpoint responda 429
+        y la UI no invite a reintentar, que es lo único que garantiza otro 1001."""
+        provider, session = self._provider([SEND_COOLDOWN])
+        with self.assertRaises(FlexCooldownError) as ctx:
+            provider._fetch_activity_xml()
+
+        self.assertIsInstance(ctx.exception, ProviderError)  # sigue siendo manejable como tal
+        self.assertEqual(len(session.calls), 1)  # ni siquiera llega a GetStatement
+        self.assertNotIn("TESTTOKEN123", str(ctx.exception))
+
+    def test_budget_stops_the_polling_before_the_proxy_cuts(self):
+        """Con el backoff completo y timeouts de 60s el peor caso pasaba los 8
+        minutos: Cloudflare cortaba en ~100s y el usuario veía un 524 con el backend
+        todavía trabajando. El presupuesto total corta antes, con un error propio."""
+        responses = [SEND_SUCCESS] + [statement_generating() for _ in range(len(POLL_BACKOFF_SECONDS) + 1)]
+        provider, session = self._provider(responses)
+
+        orig = ibkr_flex_module.STATEMENT_TOTAL_BUDGET_SECONDS
+        ibkr_flex_module.STATEMENT_TOTAL_BUDGET_SECONDS = 0
+        try:
+            with self.assertRaises(ProviderError) as ctx:
+                provider._fetch_activity_xml()
+        finally:
+            ibkr_flex_module.STATEMENT_TOTAL_BUDGET_SECONDS = orig
+
+        self.assertNotIsInstance(ctx.exception, FlexCooldownError)
+        self.assertEqual(len(session.calls), 1)  # SendRequest y nada más: no gastó el backoff
+
+
+class EndpointShapeTests(unittest.TestCase):
+    def test_preview_flex_is_sync_so_it_never_blocks_the_event_loop(self):
+        """`async def` + requests/time.sleep congela el backend entero mientras dura
+        el sync (uvicorn corre con un solo worker). Siendo sync, FastAPI la despacha
+        al threadpool. Es una propiedad del endpoint, no un detalle de estilo."""
+        import asyncio
+        from app.api.import_ib import preview_flex_import
+
+        self.assertFalse(asyncio.iscoroutinefunction(preview_flex_import))
 
 
 if __name__ == "__main__":

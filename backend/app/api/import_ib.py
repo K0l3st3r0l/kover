@@ -35,7 +35,7 @@ from ..models import Transaction, TransactionType, Stock, Option, OptionType, Op
 from ..utils.auth import get_current_user
 from ..market.market_data import MarketDataService
 from ..providers.base import BrokerCashTransaction, BrokerExecution, BrokerPositionLot, ProviderError
-from ..providers.ibkr_flex import IbkrFlexBrokerProvider
+from ..providers.ibkr_flex import FlexCooldownError, IbkrFlexBrokerProvider
 
 router = APIRouter()
 
@@ -1314,7 +1314,7 @@ async def preview_manual_import(
 
 
 @router.post("/preview-flex", response_model=FlexPreviewResponse)
-async def preview_flex_import(
+def preview_flex_import(
     incluir_efectivo: bool = True,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1324,16 +1324,29 @@ async def preview_flex_import(
     Statement), las adapta a la misma forma que el CSV/texto pegado, y
     devuelve un preview — no escribe nada. Se confirma con el mismo /confirm
     que ya usan el CSV y el texto pegado, sin cambios.
+
+    `def` y no `async def` a propósito: adentro hay HTTP bloqueante y sleeps de
+    hasta ~85s. En una corrutina eso ocupa el event loop y congela TODO el
+    backend mientras dura el sync (uvicorn corre con un solo worker). Siendo
+    sync, FastAPI la despacha al threadpool y el resto de la app sigue
+    respondiendo.
     """
     run = BrokerSyncRun(
         user_id=current_user.id,
         source="ACTIVITY",
         triggered_by="MANUAL",
-        status="OK",
+        status="ERROR",
+        error_message="corrida interrumpida sin registrar desenlace",
     )
     db.add(run)
     db.commit()
     db.refresh(run)
+
+    def _fail(message: str) -> None:
+        run.status = "ERROR"
+        run.error_message = message[:2000]
+        run.finished_at = datetime.utcnow()
+        db.commit()
 
     provider = IbkrFlexBrokerProvider()
     try:
@@ -1356,20 +1369,35 @@ async def preview_flex_import(
                 row["line"] = offset + i
 
         lots = provider.get_position_lots()
+    except FlexCooldownError as exc:
+        # 429 y no 502: no es una falla del sync sino el límite de IBKR entre
+        # peticiones de la misma query. La UI lo distingue para no invitar a
+        # reintentar, que es lo único que garantiza otro 1001.
+        _fail(str(exc))
+        raise HTTPException(status_code=429, detail=str(exc))
     except ProviderError as exc:
         # Nunca dejar caer al fallback silencioso de "0 filas": un preview
         # vacío por error es indistinguible de "ya está todo sincronizado".
-        run.status = "ERROR"
-        run.error_message = str(exc)[:2000]
-        run.finished_at = datetime.utcnow()
-        db.commit()
+        _fail(str(exc))
         raise HTTPException(status_code=502, detail=f"IBKR Flex falló: {exc}")
+    except Exception as exc:
+        # Todo lo que no sea ProviderError (XML truncado que revienta en
+        # ElementTree, un bug del adaptador) también tiene que quedar como
+        # ERROR: el run nace en ERROR justamente para que una caída acá no
+        # deje una corrida fallida registrada como exitosa con contadores
+        # nulos — indistinguible de un sync que no encontró nada.
+        _fail(f"{type(exc).__name__}: {exc}")
+        raise
 
     raw_rows = trade_rows + cash_rows
     parse_errors = trade_errors + cash_errors
 
-    base_preview = build_preview_response(raw_rows, parse_errors, db, current_user)
-    posiciones_discrepantes = build_position_reconciliation(db, current_user, lots)
+    try:
+        base_preview = build_preview_response(raw_rows, parse_errors, db, current_user)
+        posiciones_discrepantes = build_position_reconciliation(db, current_user, lots)
+    except Exception as exc:
+        _fail(f"{type(exc).__name__}: {exc}")
+        raise
 
     advertencia_global = None
     if len(raw_rows) > 500:
@@ -1378,6 +1406,10 @@ async def preview_flex_import(
             "Verifica que la Flex Query esté trayendo el período esperado antes de confirmar."
         )
 
+    # Recién acá pasa a OK: nació en ERROR para que ninguna caída intermedia
+    # deje la corrida registrada como exitosa.
+    run.status = "OK"
+    run.error_message = None
     run.raw_row_count = len(raw_rows)
     run.importable_count = base_preview.total_importables
     run.duplicate_count = base_preview.total_duplicados

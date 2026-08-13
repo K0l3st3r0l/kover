@@ -99,6 +99,8 @@ export default function ImportIB() {
   const [manualText, setManualText] = useState('')
   const [manualTradeDate, setManualTradeDate] = useState(getTodayISO)
   const [incluirEfectivo, setIncluirEfectivo] = useState(true)
+  const [flexFetchDone, setFlexFetchDone] = useState(false)
+  const [flexCooldown, setFlexCooldown] = useState(false)
   const [omitirDuplicados, setOmitirDuplicados] = useState(true)
   const [showErrors, setShowErrors] = useState(false)
   const [filterTipo, setFilterTipo] = useState('all')
@@ -174,10 +176,18 @@ export default function ImportIB() {
     }
   }
 
+  // IBKR aplica un cooldown por Flex Query: medido contra la cuenta real, tras
+  // una corrida exitosa las peticiones a los 2 y a los 16 minutos siguientes
+  // fallaron con ErrorCode 1001. Pedirlo de nuevo no acelera nada — solo gasta
+  // el intento. Por eso el botón queda bloqueado apenas se usa una vez, en vez
+  // de dejar que el usuario descubra el límite chocando contra él.
   const handleFlexPreview = async () => {
+    if (flexFetchDone) return
     setLoading(true)
     setError('')
+    setFlexCooldown(false)
     setPreview(null)
+    setFlexFetchDone(true)
 
     try {
       const res = await api.post<PreviewResponse>(
@@ -187,7 +197,12 @@ export default function ImportIB() {
       setPreview(res.data)
       setStep('preview')
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Error al traer datos desde IBKR Flex. Verifica la configuración del token y las queries.')
+      if (err?.response?.status === 429) {
+        setFlexCooldown(true)
+        setError('')
+      } else {
+        setError(err?.response?.data?.detail || 'Error al traer datos desde IBKR Flex. Verifica la configuración del token y las queries.')
+      }
     } finally {
       setLoading(false)
     }
@@ -430,17 +445,32 @@ export default function ImportIB() {
                 previsualización que el CSV o el pegado manual, y se confirma igual.
               </p>
               <div className="mt-4 p-3 bg-amber-100 dark:bg-amber-900/30 rounded-lg text-xs text-amber-700 dark:text-amber-400">
-                ⚠️ Depósitos y retiros individuales todavía no vienen en esta Flex Query — hay que habilitar
-                la sección "Transfers" en IBKR Client Portal → Reports → Flex Queries para que se incluyan.
-                El resto de las secciones sí está cubierto.
+                ⚠️ IBKR aplica un cooldown por Flex Query: una vez que traes el statement, la siguiente
+                petición falla durante un buen rato aunque todo esté bien configurado. Por eso este botón
+                se usa <strong>una sola vez por sesión</strong> — insistir no acelera nada.
               </div>
             </div>
 
+            {flexCooldown && (
+              <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl p-5">
+                <p className="font-semibold text-amber-800 dark:text-amber-300 text-sm mb-2">
+                  ⏳ IBKR está en cooldown, no es un error de configuración
+                </p>
+                <p className="text-sm text-amber-700 dark:text-amber-400">
+                  El servicio Flex respondió que no puede generar el statement en este momento
+                  (ErrorCode 1001). Pasa cuando la misma query se pidió hace poco. Tu token y tus
+                  queries están bien — vuelve a intentarlo más tarde, idealmente al día siguiente.
+                  Mientras tanto puedes importar por CSV o pegado manual.
+                </p>
+              </div>
+            )}
+
             <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-              <label className="flex items-center gap-3 cursor-pointer">
+              <label className={`flex items-center gap-3 ${flexFetchDone ? 'opacity-50' : 'cursor-pointer'}`}>
                 <input
                   type="checkbox"
                   checked={incluirEfectivo}
+                  disabled={flexFetchDone}
                   onChange={e => setIncluirEfectivo(e.target.checked)}
                   className="w-4 h-4 rounded"
                 />
@@ -448,13 +478,20 @@ export default function ImportIB() {
                   Incluir dividendos, retenciones y fees
                 </span>
               </label>
-              <button
-                onClick={handleFlexPreview}
-                disabled={loading}
-                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-semibold px-5 py-2.5 rounded-lg transition"
-              >
-                🔍 Traer y previsualizar desde IBKR
-              </button>
+              <div className="flex flex-col items-stretch sm:items-end gap-1.5">
+                <button
+                  onClick={handleFlexPreview}
+                  disabled={loading || flexFetchDone}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white font-semibold px-5 py-2.5 rounded-lg transition"
+                >
+                  🔍 Traer y previsualizar desde IBKR
+                </button>
+                {flexFetchDone && (
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    Ya se pidió el statement en esta sesión. Recarga la página para volver a intentarlo.
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         )}
