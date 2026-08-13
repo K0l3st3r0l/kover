@@ -55,5 +55,12 @@ class CoveredCallCandidate(Base):
     financial_safety_score = Column(Numeric(6, 2))
     market_safety_score = Column(Numeric(6, 2))
 
+    # K5. `final_score` es NULL cuando falta un ingrediente y `final_score_status`
+    # dice cuál: sin eso, "sin score" no se distingue de "todavía no se calculó".
+    cc_opportunity_score = Column(Numeric(6, 2))
+    cc_score_components = Column(JSONVariant)
+    final_score = Column(Numeric(6, 2))
+    final_score_status = Column(String(32))
+
     def __repr__(self):
         return f"<CoveredCallCandidate {self.occ_symbol} {self.pick_type}>"

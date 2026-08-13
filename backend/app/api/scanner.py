@@ -17,6 +17,8 @@ from ..logging_config import get_logger
 from ..models import CoveredCallCandidate, Instrument, MarketRiskSnapshot, User
 from ..models.fundamentals import FundamentalSnapshot
 from ..scanner import cc_scan, funnel
+from ..scanner.cc_scan import PICK_PROFILE_PREFIX
+from ..scanner.scoring import PROFILES, evaluate_gate
 from ..utils.auth import get_current_user
 
 router = APIRouter()
@@ -226,15 +228,37 @@ async def covered_call_scan_status(
     return {"running": cc_scan.is_running(), "last_run": cc_scan.get_last_run(db)}
 
 
+@router.get("/covered-calls/profiles")
+async def list_profiles(current_user: User = Depends(get_current_user)) -> dict[str, Any]:
+    """Los tres perfiles del plan, con sus umbrales, para que la UI no los duplique."""
+    return {
+        "profiles": [
+            {
+                "name": p.name,
+                "min_financial_safety": p.min_financial_safety,
+                "min_market_safety": p.min_market_safety,
+                "max_spread_pct": p.max_spread_pct,
+                "delta_low": p.delta_low,
+                "delta_high": p.delta_high,
+                "dte_low": p.dte_low,
+                "dte_high": p.dte_high,
+            }
+            for p in PROFILES.values()
+        ]
+    }
+
+
 @router.get("/covered-calls")
 async def list_covered_call_candidates(
     pick_type: str = Query("BALANCED", description="BALANCED | PREMIUM | UPSIDE"),
+    profile: Optional[str] = Query(None, description="CONSERVADOR | BALANCEADO | AGRESIVO"),
+    include_rejected: bool = Query(False, description="incluir los que no pasan la puerta, marcados"),
     min_financial_safety: Optional[float] = Query(None, ge=0, le=100),
     min_market_safety: Optional[float] = Query(None, ge=0, le=100),
     max_spread_pct: Optional[float] = Query(None, gt=0, description="fracción, no porcentaje: 0.12 = 12%"),
     min_liquidity: Optional[float] = Query(None, ge=0, le=100),
     max_dte: Optional[int] = Query(None, ge=1),
-    order_by: str = Query("annualized_premium_yield", description="annualized_premium_yield | annualized_return_if_assigned | liquidity_score"),
+    order_by: str = Query("final_score", description="final_score | cc_opportunity_score | annualized_premium_yield | annualized_return_if_assigned | liquidity_score"),
     limit: int = Query(100, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -248,17 +272,31 @@ async def list_covered_call_candidates(
     cero. Ver la regla en wiki/projects/kover/decisions/fundamentales-sec-edgar.md.
     """
     columnas_validas = {
+        "final_score": CoveredCallCandidate.final_score,
+        "cc_opportunity_score": CoveredCallCandidate.cc_opportunity_score,
         "annualized_premium_yield": CoveredCallCandidate.annualized_premium_yield,
         "annualized_return_if_assigned": CoveredCallCandidate.annualized_return_if_assigned,
         "liquidity_score": CoveredCallCandidate.liquidity_score,
     }
+    perfil = None
+    pick = pick_type.upper()
+    if profile:
+        perfil = PROFILES.get(profile.upper())
+        if perfil is None:
+            raise HTTPException(status_code=400, detail=f"perfil inválido: {profile}")
+        # Con perfil se lee el pick elegido DENTRO de ese perfil, no el
+        # balanceado global: el contrato que maximiza el score suele quedar
+        # fuera de la banda de delta conservadora, y filtrarlo después dejaría
+        # al papel afuera aunque tuviera otro strike que sí califica.
+        if pick_type.upper() == "BALANCED":
+            pick = f"{PICK_PROFILE_PREFIX}{perfil.name}"
     if order_by not in columnas_validas:
         raise HTTPException(status_code=400, detail=f"order_by inválido: {order_by}")
 
     q = (
         db.query(CoveredCallCandidate, Instrument)
         .join(Instrument, Instrument.id == CoveredCallCandidate.instrument_id)
-        .filter(CoveredCallCandidate.pick_type == pick_type.upper())
+        .filter(CoveredCallCandidate.pick_type == pick)
     )
     if min_financial_safety is not None:
         q = q.filter(CoveredCallCandidate.financial_safety_score >= min_financial_safety)
@@ -276,12 +314,39 @@ async def list_covered_call_candidates(
     def _f(value):
         return float(value) if value is not None else None
 
+    # La puerta se evalúa acá y no en el scan: depende del perfil que elija el
+    # usuario, y guardarla obligaría a rescanear para cambiar de perfil cuando
+    # lo único que cambia es un umbral. Sin perfil no hay puerta — la lista es
+    # el ranking crudo de K4.
+    evaluados = []
+    for c, inst in filas:
+        pasa, razones = (True, [])
+        if perfil is not None:
+            pasa, razones = evaluate_gate(
+                perfil,
+                _f(c.financial_safety_score),
+                _f(c.market_safety_score),
+                _f(c.spread_pct),
+                _f(c.delta),
+                c.dte,
+            )
+        if perfil is not None and not pasa and not include_rejected:
+            continue
+        evaluados.append((c, inst, pasa, razones))
+
     return {
-        "pick_type": pick_type.upper(),
-        "count": len(filas),
+        "pick_type": pick,
+        "profile": perfil.name if perfil else None,
+        "count": len(evaluados),
         "candidates": [
             {
                 "symbol": inst.symbol,
+                "gate_passed": pasa,
+                "gate_reasons": razones,
+                "cc_opportunity_score": _f(c.cc_opportunity_score),
+                "cc_score_components": c.cc_score_components,
+                "final_score": _f(c.final_score),
+                "final_score_status": c.final_score_status,
                 "name": inst.name,
                 "occ_symbol": c.occ_symbol,
                 "expiration": c.expiration.isoformat(),
@@ -311,6 +376,6 @@ async def list_covered_call_candidates(
                 "quote_as_of": c.quote_as_of.isoformat() if c.quote_as_of else None,
                 "scanned_at": c.scanned_at.isoformat() if c.scanned_at else None,
             }
-            for c, inst in filas
+            for c, inst, pasa, razones in evaluados
         ],
     }

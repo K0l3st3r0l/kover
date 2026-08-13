@@ -65,6 +65,13 @@ class CoveredCallMetrics:
     open_interest: Optional[int]
     liquidity_score: Optional[float]
     liquidity_components: list[dict] = field(default_factory=list)
+    # Los llena K5 (app/scanner/scoring.py) después de tener toda la corrida:
+    # cinco de los siete componentes se normalizan contra sus pares, así que no
+    # se pueden calcular mirando un contrato aislado.
+    cc_opportunity_score: Optional[float] = None
+    cc_score_components: list[dict] = field(default_factory=list)
+    final_score: Optional[float] = None
+    final_score_status: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -92,6 +99,10 @@ class CoveredCallMetrics:
             "open_interest": self.open_interest,
             "liquidity_score": self.liquidity_score,
             "liquidity_components": self.liquidity_components,
+            "cc_opportunity_score": self.cc_opportunity_score,
+            "cc_score_components": self.cc_score_components,
+            "final_score": self.final_score,
+            "final_score_status": self.final_score_status,
         }
 
 
@@ -315,11 +326,18 @@ def pick_best(candidatos: list[CoveredCallMetrics]) -> dict[str, Optional[Covere
 
     Un único "mejor" esconde que la pregunta tiene tres respuestas legítimas
     según qué quiere el operador ese mes. Se calculan las tres y se muestran.
+
+    Si los candidatos ya traen `cc_opportunity_score` (K5 lo asigna tras ver la
+    corrida completa), el balanceado sale de ahí. Si no —una llamada aislada,
+    un test— cae al heurístico de prima ponderada por liquidez, que ordena
+    parecido sin necesitar la población.
     """
     if not candidatos:
         return {"balanced": None, "premium": None, "upside": None}
 
     def puntaje_balanceado(c: CoveredCallMetrics) -> float:
+        if c.cc_opportunity_score is not None:
+            return c.cc_opportunity_score
         # Rendimiento anualizado ponderado por liquidez: una prima excelente en
         # un contrato que no se puede cerrar no es una oportunidad.
         liquidez = (c.liquidity_score if c.liquidity_score is not None else 50.0) / 100.0

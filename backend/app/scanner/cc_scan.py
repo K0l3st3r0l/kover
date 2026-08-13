@@ -31,11 +31,16 @@ from ..models import (
 from ..providers.base import ProviderError
 from ..providers.cboe_chains import CboeChainsProvider
 from .covered_calls import ChainFilter, evaluate_chain, pick_best
+from .scoring import PROFILES, compute_cc_opportunity, compute_final_score, evaluate_gate
 from .universe import STAGE_OPTIONABLE
 
 logger = get_logger(__name__)
 
 LAST_RUN_SETTING_KEY = "scanner:covered_calls:last_run"
+# Los picks por perfil se guardan como PERFIL_<NOMBRE> en la misma columna
+# pick_type. El índice único es (instrument_id, pick_type), así que no hace
+# falta tabla ni columna nueva.
+PICK_PROFILE_PREFIX = "PERFIL_"
 # CBOE limita por ráfaga (429 con Retry-After ~9s). Medido: a ~5 req/s la
 # corrida de 306 símbolos completó 60 y falló 246. Un request por segundo la
 # sostiene entera —~5 min para el universo, aceptable para un job dos veces al
@@ -162,6 +167,10 @@ def _upsert_candidate(
     row.liquidity_components = metrics.liquidity_components
     row.financial_safety_score = fss
     row.market_safety_score = mss
+    row.cc_opportunity_score = metrics.cc_opportunity_score
+    row.cc_score_components = metrics.cc_score_components
+    row.final_score = metrics.final_score
+    row.final_score_status = metrics.final_score_status
 
 
 def run(
@@ -195,7 +204,11 @@ def run(
 
         fundamentales, mercado = _latest_scores(db, [i.id for i in objetivos])
 
-        con_candidatos = 0
+        # ── Fase 1: traer y evaluar todas las cadenas ─────────────────────
+        # No se puntúa ni se persiste todavía: cinco de los siete componentes
+        # del CC Opportunity se normalizan contra el resto de la corrida (K5),
+        # así que hay que ver la población completa antes de puntuar a nadie.
+        por_simbolo: dict[int, list] = {}
         sin_candidatos: list[str] = []
         fallidos: list[dict] = []
         descartes_totales: dict[str, int] = {}
@@ -226,16 +239,68 @@ def run(
                 sin_candidatos.append(instrument.symbol)
                 continue
 
+            por_simbolo[instrument.id] = (candidatos, underlying.as_of)
+
+        # ── Fase 2: puntuar contra la corrida completa ─────────────────────
+        poblacion = [c for candidatos, _ in por_simbolo.values() for c in candidatos]
+        resultados = compute_cc_opportunity(poblacion)
+        for metrics, resultado in zip(poblacion, resultados):
+            metrics.cc_opportunity_score = resultado.score
+            metrics.cc_score_components = [c.as_dict() for c in resultado.components]
+
+        # ── Fase 3: elegir los tres por papel y persistir ──────────────────
+        instrumentos_por_id = {i.id: i for i in objetivos}
+        con_candidatos = 0
+        for instrument_id, (candidatos, quote_as_of) in por_simbolo.items():
+            instrument = instrumentos_por_id[instrument_id]
+            fss = fundamentales.get(instrument_id)
+            mss = mercado.get(instrument_id)
+            for metrics in candidatos:
+                metrics.final_score, metrics.final_score_status = compute_final_score(
+                    metrics.cc_opportunity_score, fss, mss
+                )
+
             mejores = pick_best(candidatos)
-            fss = fundamentales.get(instrument.id)
-            mss = mercado.get(instrument.id)
-            for pick_type, metrics in (
+            elegidos = [
                 (PICK_BALANCED, mejores["balanced"]),
                 (PICK_PREMIUM, mejores["premium"]),
                 (PICK_UPSIDE, mejores["upside"]),
-            ):
+            ]
+
+            # Además, el mejor contrato QUE PASA cada perfil. Sin esto la puerta
+            # se aplicaría sobre un contrato ya elegido con otro criterio, y un
+            # papel quedaría rechazado aunque tuviera otro strike que sí
+            # califica — el delta que maximiza el CC Opportunity (~0,40) queda
+            # fuera de la banda conservadora (0,20–0,30) casi siempre.
+            for nombre, perfil in PROFILES.items():
+                admisibles = [
+                    c for c in candidatos
+                    if evaluate_gate(perfil, fss, mss, c.spread_pct, c.delta, c.dte)[0]
+                ]
+                if admisibles:
+                    elegidos.append((
+                        f"{PICK_PROFILE_PREFIX}{nombre}",
+                        max(admisibles, key=lambda c: (
+                            c.final_score if c.final_score is not None else -1,
+                            c.cc_opportunity_score or 0,
+                        )),
+                    ))
+
+            for pick_type, metrics in elegidos:
                 if metrics is not None:
-                    _upsert_candidate(db, instrument, pick_type, metrics, underlying.as_of, fss, mss)
+                    _upsert_candidate(db, instrument, pick_type, metrics, quote_as_of, fss, mss)
+            vigentes = {pt for pt, m in elegidos if m is not None}
+            obsoletos = (
+                db.query(CoveredCallCandidate)
+                .filter(
+                    CoveredCallCandidate.instrument_id == instrument.id,
+                    CoveredCallCandidate.pick_type.notin_(vigentes),
+                )
+                .all()
+            )
+            for fila in obsoletos:
+                db.delete(fila)
+
             con_candidatos += 1
             db.commit()
 
@@ -244,6 +309,7 @@ def run(
             "duration_seconds": round(time.monotonic() - inicio, 1),
             "symbols_scanned": len(objetivos),
             "symbols_with_candidates": con_candidatos,
+            "contracts_scored": len(poblacion),
             "symbols_without_candidates": len(sin_candidatos),
             "failed": fallidos[:50],
             "failed_count": len(fallidos),

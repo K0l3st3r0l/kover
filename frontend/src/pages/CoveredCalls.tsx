@@ -11,8 +11,23 @@ interface LiquidityComponent {
   note: string
 }
 
+interface ScoreComponent {
+  name: string
+  raw_value: number | null
+  normalized: number | null
+  weight: number
+  contribution: number
+  note: string
+}
+
 interface Candidate {
   symbol: string
+  gate_passed: boolean
+  gate_reasons: string[]
+  cc_opportunity_score: number | null
+  cc_score_components: ScoreComponent[] | null
+  final_score: number | null
+  final_score_status: string | null
   name: string | null
   occ_symbol: string
   expiration: string
@@ -68,6 +83,23 @@ const PICK_LABELS: Record<string, { title: string; help: string }> = {
   },
 }
 
+const GATE_LABELS: Record<string, string> = {
+  VETO_HARD_FLAG: 'Veto por hard flag en sus filings',
+  BAJO_FINANCIAL_SAFETY: 'Financial Safety bajo el umbral del perfil',
+  BAJO_MARKET_SAFETY: 'Market Safety bajo el umbral del perfil',
+  SPREAD_ANCHO: 'Spread más ancho de lo que tolera el perfil',
+  DELTA_FUERA_DE_PERFIL: 'Delta fuera de la banda del perfil',
+  DTE_FUERA_DE_PERFIL: 'Vencimiento fuera de la ventana del perfil',
+  SIN_FUNDAMENTALES: 'Sin fundamentales: no hay con qué evaluar la puerta',
+}
+
+const FINAL_STATUS_LABELS: Record<string, string> = {
+  MISSING_FUNDAMENTAL: 'Sin Financial Safety — no se puntúa por omisión',
+  MISSING_MARKET: 'Sin Market Safety — no se puntúa por omisión',
+  MISSING_BOTH: 'Sin ninguno de los dos scores de seguridad',
+  MISSING_CC_OPPORTUNITY: 'Sin CC Opportunity: datos insuficientes del contrato',
+}
+
 const pct = (v: number | null | undefined, digits = 2) =>
   v === null || v === undefined ? '—' : `${(v * 100).toFixed(digits)}%`
 const usd = (v: number | null | undefined, digits = 2) =>
@@ -116,6 +148,8 @@ function ScoreBadge({ value, label }: { value: number | null; label: string }) {
 
 export default function CoveredCalls() {
   const [pickType, setPickType] = useState('BALANCED')
+  const [profile, setProfile] = useState('')
+  const [includeRejected, setIncludeRejected] = useState(false)
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [lastRun, setLastRun] = useState<LastRun | null>(null)
   const [running, setRunning] = useState(false)
@@ -127,13 +161,17 @@ export default function CoveredCalls() {
   const [minMarket, setMinMarket] = useState('')
   const [minLiquidity, setMinLiquidity] = useState('')
   const [maxDte, setMaxDte] = useState('')
-  const [orderBy, setOrderBy] = useState('annualized_premium_yield')
+  const [orderBy, setOrderBy] = useState('final_score')
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const params: Record<string, string | number> = { pick_type: pickType, order_by: orderBy, limit: 200 }
+      const params: Record<string, string | number | boolean> = { pick_type: pickType, order_by: orderBy, limit: 200 }
+      if (profile) {
+        params.profile = profile
+        params.include_rejected = includeRejected
+      }
       if (minFinancial) params.min_financial_safety = Number(minFinancial)
       if (minMarket) params.min_market_safety = Number(minMarket)
       if (minLiquidity) params.min_liquidity = Number(minLiquidity)
@@ -145,7 +183,7 @@ export default function CoveredCalls() {
     } finally {
       setLoading(false)
     }
-  }, [pickType, orderBy, minFinancial, minMarket, minLiquidity, maxDte])
+  }, [pickType, profile, includeRejected, orderBy, minFinancial, minMarket, minLiquidity, maxDte])
 
   const loadStatus = useCallback(async () => {
     try {
@@ -250,6 +288,42 @@ export default function CoveredCalls() {
         </div>
         <p className="text-xs text-gray-500 dark:text-gray-400">{pick.help}</p>
 
+        <div className="pt-3 border-t border-gray-100 dark:border-gray-700 space-y-2">
+          <div className="flex items-center gap-3 flex-wrap">
+            <span className="text-sm font-semibold text-gray-700 dark:text-gray-200">Perfil:</span>
+            {[
+              { key: '', label: 'Sin puerta' },
+              { key: 'CONSERVADOR', label: 'Conservador' },
+              { key: 'BALANCEADO', label: 'Balanceado' },
+              { key: 'AGRESIVO', label: 'Agresivo' },
+            ].map(p => (
+              <button
+                key={p.key}
+                onClick={() => setProfile(p.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                  profile === p.key
+                    ? 'bg-green-600 text-white'
+                    : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+            {profile && (
+              <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 cursor-pointer ml-2">
+                <input type="checkbox" checked={includeRejected}
+                  onChange={e => setIncludeRejected(e.target.checked)} className="w-3.5 h-3.5 rounded" />
+                Mostrar también los rechazados, con su motivo
+              </label>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            {profile
+              ? 'Con perfil elegido se aplica la puerta: primero se descarta lo inadmisible, después se ordena. Para cada papel se muestra el mejor contrato que pasa ESE perfil, no el mejor absoluto — el strike que maximiza el score suele quedar fuera de la banda de delta conservadora.'
+              : 'Sin perfil no hay puerta: es el ranking crudo, incluidas las filas con veto. Elige un perfil para que se aplique el criterio de admisión antes del orden.'}
+          </p>
+        </div>
+
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 pt-2 border-t border-gray-100 dark:border-gray-700">
           <label className="text-xs text-gray-500 dark:text-gray-400">
             Financial Safety ≥
@@ -279,6 +353,8 @@ export default function CoveredCalls() {
             Ordenar por
             <select value={orderBy} onChange={e => setOrderBy(e.target.value)}
               className="mt-1 w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-sm text-gray-900 dark:text-white">
+              <option value="final_score">Final Score</option>
+              <option value="cc_opportunity_score">CC Opportunity</option>
               <option value="annualized_premium_yield">Prima anualizada</option>
               <option value="annualized_return_if_assigned">Retorno si asignan</option>
               <option value="liquidity_score">Liquidez</option>
@@ -332,6 +408,8 @@ export default function CoveredCalls() {
               <thead className="bg-gray-50 dark:bg-gray-700/50 text-xs uppercase text-gray-500 dark:text-gray-400">
                 <tr>
                   <th className="px-3 py-2 text-left">Papel</th>
+                  <th className="px-3 py-2 text-right" title="0,45 CC Opportunity + 0,35 Financial Safety + 0,20 Market Safety">Final</th>
+                  <th className="px-3 py-2 text-right" title="Oportunidad del contrato, normalizada contra el resto de la corrida">CC Opp.</th>
                   <th className="px-3 py-2 text-right">Precio</th>
                   <th className="px-3 py-2 text-right">Strike</th>
                   <th className="px-3 py-2 text-right">Vence</th>
@@ -355,7 +433,24 @@ export default function CoveredCalls() {
                       onClick={() => setExpanded(expanded === c.occ_symbol ? null : c.occ_symbol)}
                       className="hover:bg-gray-50 dark:hover:bg-gray-700/40 cursor-pointer text-gray-700 dark:text-gray-200"
                     >
-                      <td className="px-3 py-2 font-bold">{c.symbol}</td>
+                      <td className="px-3 py-2 font-bold">
+                        {c.symbol}
+                        {!c.gate_passed && (
+                          <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 font-semibold">
+                            rechazado
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-bold">
+                        {c.final_score !== null ? (
+                          c.final_score.toFixed(0)
+                        ) : (
+                          <span className="text-xs text-gray-400" title={FINAL_STATUS_LABELS[c.final_score_status || ''] || c.final_score_status || ''}>
+                            —
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right">{c.cc_opportunity_score?.toFixed(0) ?? '—'}</td>
                       <td className="px-3 py-2 text-right">{usd(c.underlying_price)}</td>
                       <td className="px-3 py-2 text-right font-semibold">{usd(c.strike)}</td>
                       <td className="px-3 py-2 text-right whitespace-nowrap">{c.expiration}</td>
@@ -380,8 +475,8 @@ export default function CoveredCalls() {
                     </tr>
                     {expanded === c.occ_symbol && (
                       <tr className="bg-gray-50 dark:bg-gray-900/40">
-                        <td colSpan={15} className="px-4 py-4">
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-gray-600 dark:text-gray-300">
+                        <td colSpan={17} className="px-4 py-4">
+                          <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-6 text-xs text-gray-600 dark:text-gray-300">
                             <div className="space-y-1">
                               <p className="font-semibold text-gray-800 dark:text-gray-100">La operación</p>
                               <p>Contrato: <code className="text-blue-600 dark:text-blue-400">{c.occ_symbol}</code></p>
@@ -399,6 +494,36 @@ export default function CoveredCalls() {
                                 </p>
                               ))}
                               <p>Volumen hoy: {c.volume ?? '—'} · OI: {c.open_interest ?? '—'}</p>
+                            </div>
+                            <div className="space-y-1">
+                              <p className="font-semibold text-gray-800 dark:text-gray-100">
+                                Final Score {c.final_score?.toFixed(0) ?? '—'}
+                              </p>
+                              {c.final_score === null && c.final_score_status && (
+                                <p className="text-amber-600 dark:text-amber-400">
+                                  {FINAL_STATUS_LABELS[c.final_score_status] || c.final_score_status}
+                                </p>
+                              )}
+                              <p>CC Opportunity {c.cc_opportunity_score?.toFixed(0) ?? '—'} (peso 45%)</p>
+                              <p>Financial Safety {c.financial_safety_score?.toFixed(0) ?? 'pendiente'} (peso 35%)</p>
+                              <p>Market Safety {c.market_safety_score?.toFixed(0) ?? 'pendiente'} (peso 20%)</p>
+                              {!c.gate_passed && c.gate_reasons.length > 0 && (
+                                <div className="pt-2">
+                                  <p className="font-semibold text-red-600 dark:text-red-400">No pasa la puerta:</p>
+                                  {c.gate_reasons.map(r => (
+                                    <p key={r} className="text-red-600 dark:text-red-400">• {GATE_LABELS[r] || r}</p>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div className="space-y-1">
+                              <p className="font-semibold text-gray-800 dark:text-gray-100">Desglose CC Opportunity</p>
+                              {(c.cc_score_components || []).map(comp => (
+                                <p key={comp.name} title={comp.note}>
+                                  {comp.name}: {comp.normalized === null ? 'sin dato' : `${(comp.normalized * 100).toFixed(0)}%`}
+                                  <span className="text-gray-400"> × {(comp.weight * 100).toFixed(0)}%</span>
+                                </p>
+                              ))}
                             </div>
                             <div className="space-y-1">
                               <p className="font-semibold text-gray-800 dark:text-gray-100">Contexto</p>
