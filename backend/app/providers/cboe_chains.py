@@ -12,7 +12,14 @@ Es el mismo razonamiento que resolvió la optionabilidad en K3 (ver
 wiki/projects/kover/decisions/universo-market-safety-score.md): un archivo
 público servido por CDN le gana a scraping de un endpoint no oficial con
 detección de bots. Medido contra los símbolos reales del universo: 0,1–0,3s y
-73–430 KB por símbolo, sin rate limit.
+73–430 KB por símbolo.
+
+**CBOE sí limita por ráfaga**, al contrario de lo que se asumió al escribir este
+módulo: una corrida de 306 símbolos a ~5 req/s completó 60 y las otras 246
+volvieron HTTP 429. La respuesta trae `Retry-After` (medido: 9s), así que el
+límite se respeta leyendo el header en vez de adivinar un backoff, y el scan
+espacia sus requests. No es el bloqueo por IP de yfinance —se destraba en
+segundos y viene documentado en la respuesta— pero tampoco es barra libre.
 
 **La cotización es diferida ~15 minutos.** Viene con su propio `timestamp`, que
 se propaga como `as_of` en la Provenance: quien mire una prima tiene que poder
@@ -23,6 +30,7 @@ delay es irrelevante, pero eso lo decide quien lee el dato, no este módulo.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Optional
@@ -50,6 +58,10 @@ class UnderlyingQuote:
 CHAIN_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
 REQUEST_TIMEOUT = 25
 USER_AGENT = "kover/1.0 (covered call scanner)"
+# CBOE limita por ráfaga con un 429 de Cloudflare y un Retry-After corto.
+MAX_429_RETRIES = 3
+DEFAULT_RETRY_AFTER = 10.0
+MAX_RETRY_AFTER = 60.0
 
 # OSI: raíz + AAMMDD + C/P + strike en milésimas (8 dígitos). El sufijo mide
 # siempre 15 caracteres, así que se parsea por posición y no con una clase de
@@ -83,10 +95,32 @@ class CboeChainsProvider:
 
     def _fetch(self, symbol: str) -> dict:
         url = CHAIN_URL.format(symbol=symbol.upper())
-        try:
-            resp = self._session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT})
-        except requests.RequestException as exc:
-            raise ProviderError(self.name, f"error de red pidiendo la cadena de {symbol}: {exc}") from exc
+        resp = None
+
+        for intento in range(MAX_429_RETRIES + 1):
+            try:
+                resp = self._session.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT})
+            except requests.RequestException as exc:
+                raise ProviderError(self.name, f"error de red pidiendo la cadena de {symbol}: {exc}") from exc
+
+            if resp.status_code != 429:
+                break
+
+            # CBOE limita por ráfaga y dice explícitamente cuánto esperar en
+            # Retry-After (medido: 9 segundos). Medido también el costo de
+            # ignorarlo: una corrida de 306 símbolos a ~5 req/s completó 60 y
+            # falló 246. Se respeta el header en vez de adivinar un backoff.
+            espera = _retry_after_seconds(resp.headers.get("Retry-After"))
+            if intento == MAX_429_RETRIES:
+                raise ProviderError(
+                    self.name,
+                    f"{symbol}: CBOE sigue limitando tras {MAX_429_RETRIES} esperas (HTTP 429)",
+                )
+            logger.info(
+                "CBOE limitó la ráfaga, esperando",
+                extra={"symbol": symbol, "sleep_seconds": espera, "attempt": intento + 1},
+            )
+            time.sleep(espera)
 
         if resp.status_code == 404:
             # CBOE responde 404 para símbolos sin cadena publicada. Es un
@@ -186,6 +220,16 @@ class CboeChainsProvider:
     def probe(self) -> dict:
         quotes, underlying = self.get_chain("AAPL")
         return {"contracts": len(quotes), "underlying_price": underlying.price}
+
+
+def _retry_after_seconds(header: Optional[str]) -> float:
+    """Segundos a esperar según Retry-After, acotado para no colgar la corrida."""
+    if not header:
+        return DEFAULT_RETRY_AFTER
+    try:
+        return min(max(float(header), 1.0), MAX_RETRY_AFTER)
+    except (TypeError, ValueError):
+        return DEFAULT_RETRY_AFTER
 
 
 def _as_float(value) -> Optional[float]:

@@ -8,7 +8,12 @@ import unittest
 from datetime import date, datetime, timezone
 
 from app.providers.base import OptionQuote, Provenance, ProviderError
-from app.providers.cboe_chains import CboeChainsProvider, parse_osi_symbol
+import app.providers.cboe_chains as cboe_module
+from app.providers.cboe_chains import (
+    CboeChainsProvider,
+    _retry_after_seconds,
+    parse_osi_symbol,
+)
 from app.scanner.covered_calls import (
     ChainFilter,
     compute_covered_call,
@@ -196,9 +201,10 @@ class PickBestTests(unittest.TestCase):
 # ─── Provider con HTTP fijo ───────────────────────────────────────────────────
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self._payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
         self.content = b"x"
 
     def json(self):
@@ -208,13 +214,16 @@ class FakeResponse:
 
 
 class FakeSession:
+    """Devuelve la última respuesta indefinidamente una vez agotada la lista."""
+
     def __init__(self, response):
-        self._response = response
+        self._responses = response if isinstance(response, list) else [response]
         self.calls = []
 
     def get(self, url, timeout=None, headers=None):
         self.calls.append(url)
-        return self._response
+        idx = min(len(self.calls) - 1, len(self._responses) - 1)
+        return self._responses[idx]
 
 
 CHAIN_PAYLOAD = {
@@ -264,6 +273,44 @@ class CboeChainsProviderTests(unittest.TestCase):
         with self.assertRaises(ProviderError) as ctx:
             provider.get_chain("NOPE")
         self.assertFalse(ctx.exception.retryable)
+
+    def test_429_is_retried_honoring_retry_after(self):
+        """CBOE limita por ráfaga y dice cuánto esperar. Ignorarlo costó 246 de
+        306 símbolos en la primera corrida real del universo."""
+        limitado = FakeResponse(None, status_code=429, headers={"Retry-After": "9"})
+        session = FakeSession([limitado, limitado, FakeResponse(CHAIN_PAYLOAD)])
+        provider = CboeChainsProvider(session=session)
+
+        dormido = []
+        original = cboe_module.time.sleep
+        cboe_module.time.sleep = lambda s: dormido.append(s)
+        try:
+            quotes, _ = provider.get_chain("F")
+        finally:
+            cboe_module.time.sleep = original
+
+        self.assertEqual(len(quotes), 2)
+        self.assertEqual(dormido, [9.0, 9.0])   # respetó el header, no un backoff inventado
+        self.assertEqual(len(session.calls), 3)
+
+    def test_429_forever_gives_up_with_a_clear_error(self):
+        limitado = FakeResponse(None, status_code=429, headers={"Retry-After": "9"})
+        provider = CboeChainsProvider(session=FakeSession([limitado]))
+
+        original = cboe_module.time.sleep
+        cboe_module.time.sleep = lambda s: None
+        try:
+            with self.assertRaises(ProviderError) as ctx:
+                provider.get_chain("F")
+        finally:
+            cboe_module.time.sleep = original
+        self.assertIn("429", str(ctx.exception))
+
+    def test_retry_after_falls_back_when_the_header_is_junk(self):
+        self.assertEqual(_retry_after_seconds(None), 10.0)
+        self.assertEqual(_retry_after_seconds("no-soy-un-numero"), 10.0)
+        self.assertEqual(_retry_after_seconds("9"), 9.0)
+        self.assertEqual(_retry_after_seconds("99999"), 60.0)   # acotado
 
     def test_empty_chain_raises_instead_of_returning_nothing(self):
         payload = {"timestamp": "2026-08-13 14:32:39", "data": {"current_price": 10.0, "options": []}}

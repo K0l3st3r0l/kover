@@ -74,6 +74,21 @@ const usd = (v: number | null | undefined, digits = 2) =>
   v === null || v === undefined ? '—' : `$${v.toFixed(digits)}`
 
 function ScoreBadge({ value, label }: { value: number | null; label: string }) {
+  // Un Financial Safety de exactamente 0 no es "puntaje muy bajo": es el veto
+  // de un hard flag (going concern, patrimonio negativo, runway bajo 2
+  // trimestres). El score se fuerza a 0 a propósito para que no se promedie
+  // con nada. Mostrarlo como un número más lo escondería justo en la fila que
+  // más importa no operar.
+  if (value === 0 && label === 'Financial Safety') {
+    return (
+      <span
+        className="text-xs px-2 py-0.5 rounded-full font-bold bg-red-600 text-white"
+        title="Veto por hard flag: la empresa tiene una señal de fragilidad crítica en sus filings"
+      >
+        VETO
+      </span>
+    )
+  }
   if (value === null || value === undefined) {
     // Sin dato es "pendiente", nunca 0: un cero acá se leería como "empresa
     // frágil" y es exactamente lo contrario de lo que significa una ausencia.
@@ -275,6 +290,29 @@ export default function CoveredCalls() {
           ⚠️ Los filtros de seguridad dejan fuera los papeles sin snapshot (los que muestran
           "pendiente"), porque un umbral no puede evaluar un dato que no existe. Sin filtro, aparecen
           todos.
+        </p>
+      </div>
+
+      {/* Cómo leer esta tabla sin caerse en las dos trampas obvias */}
+      <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-xl p-5 space-y-2 text-sm">
+        <p className="font-semibold text-amber-800 dark:text-amber-300">Antes de operar cualquiera de estas filas</p>
+        <p className="text-amber-700 dark:text-amber-400">
+          <strong>Esto es un ranking, no una recomendación.</strong> Ordena por rendimiento; no aplica
+          la puerta fundamental. Una fila marcada <span className="px-1.5 py-0.5 rounded bg-red-600 text-white text-xs font-bold">VETO</span>{' '}
+          tiene un hard flag crítico en sus filings — no debería operarse por buena que se vea la prima.
+          Cruzar el ranking con los dos scores de seguridad es lo que hace el Final Score, que todavía
+          no está construido.
+        </p>
+        <p className="text-amber-700 dark:text-amber-400">
+          <strong>El anualizado engaña en vencimientos cortos.</strong> Un contrato a 8 días con 2,9% de
+          prima se anualiza sobre 130%, pero eso supone repetir la operación 45 veces al año con la
+          misma prima y sin que te asignen nunca. Mira la columna <em>Rend.</em> —el retorno real del
+          período— y usa el anualizado solo para comparar plazos entre sí.
+        </p>
+        <p className="text-amber-700 dark:text-amber-400">
+          <strong>El colchón es delgado arriba del ranking.</strong> Las primas más gordas vienen de los
+          papeles más volátiles: un colchón de 3% no protege de una caída del 15%, que en estos nombres
+          pasa en un día.
         </p>
       </div>
 

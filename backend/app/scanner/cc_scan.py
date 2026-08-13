@@ -36,9 +36,11 @@ from .universe import STAGE_OPTIONABLE
 logger = get_logger(__name__)
 
 LAST_RUN_SETTING_KEY = "scanner:covered_calls:last_run"
-# CBOE es un CDN sin rate limit conocido y cada símbolo tarda 0,1–0,3s, pero
-# 306 requests seguidos sin pausa a un servicio gratuito es mala vecindad.
-POLITE_DELAY_SECONDS = 0.15
+# CBOE limita por ráfaga (429 con Retry-After ~9s). Medido: a ~5 req/s la
+# corrida de 306 símbolos completó 60 y falló 246. Un request por segundo la
+# sostiene entera —~5 min para el universo, aceptable para un job dos veces al
+# día— y el provider igual respeta el Retry-After si aparece.
+POLITE_DELAY_SECONDS = 1.0
 
 _run_lock = threading.Lock()
 _is_running = False
