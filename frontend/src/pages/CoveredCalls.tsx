@@ -58,6 +58,40 @@ interface Candidate {
   scanned_at: string | null
 }
 
+interface HoldingCandidate {
+  occ_symbol: string
+  strike: number
+  expiration: string
+  dte: number
+  call_bid: number
+  spread_pct: number | null
+  delta: number | null
+  open_interest: number | null
+  contracts: number
+  position_premium_total: number
+  gain_if_assigned: number
+  total_if_assigned: number
+  below_cost_basis: boolean
+  net_loss_if_assigned: boolean
+  assignment_probability: number | null
+  annualized_premium_on_cost: number | null
+}
+
+interface HoldingPosition {
+  ticker: string
+  shares: number
+  contracts: number
+  uncovered_shares: number
+  cost_basis: number
+  cost_basis_source: string
+  gross_cost: number | null
+  premium_collected: number
+  market_price: number
+  vs_cost_basis: number
+  quote_as_of: string
+  candidates: HoldingCandidate[]
+}
+
 interface LastRun {
   started_at: string
   duration_seconds: number
@@ -147,6 +181,9 @@ function ScoreBadge({ value, label }: { value: number | null; label: string }) {
 }
 
 export default function CoveredCalls() {
+  const [mode, setMode] = useState<'universo' | 'posiciones'>('posiciones')
+  const [holdings, setHoldings] = useState<HoldingPosition[]>([])
+  const [holdingsLoading, setHoldingsLoading] = useState(false)
   const [pickType, setPickType] = useState('BALANCED')
   const [profile, setProfile] = useState('')
   const [includeRejected, setIncludeRejected] = useState(false)
@@ -185,6 +222,23 @@ export default function CoveredCalls() {
     }
   }, [pickType, profile, includeRejected, orderBy, minFinancial, minMarket, minLiquidity, maxDte])
 
+  const loadHoldings = useCallback(async () => {
+    setHoldingsLoading(true)
+    setError('')
+    try {
+      const res = await api.get('/api/scanner/covered-calls/holdings')
+      setHoldings(res.data.positions || [])
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'No se pudieron cargar las posiciones.')
+    } finally {
+      setHoldingsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (mode === 'posiciones') loadHoldings()
+  }, [mode, loadHoldings])
+
   const loadStatus = useCallback(async () => {
     try {
       const res = await api.get('/api/scanner/covered-calls/status')
@@ -197,8 +251,8 @@ export default function CoveredCalls() {
   }, [])
 
   useEffect(() => {
-    load()
-  }, [load])
+    if (mode === 'universo') load()
+  }, [mode, load])
 
   useEffect(() => {
     loadStatus()
@@ -251,7 +305,30 @@ export default function CoveredCalls() {
         </button>
       </div>
 
-      {lastRun && (
+      <div className="flex gap-2">
+        {[
+          { key: 'posiciones' as const, label: '📦 Sobre lo que ya tengo' },
+          { key: 'universo' as const, label: '🌎 Buscar en el universo' },
+        ].map(m => (
+          <button
+            key={m.key}
+            onClick={() => setMode(m.key)}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition ${
+              mode === m.key
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
+            }`}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'posiciones' && (
+        <HoldingsView positions={holdings} loading={holdingsLoading} onReload={loadHoldings} />
+      )}
+
+      {mode === 'universo' && lastRun && (
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-4 text-sm text-gray-600 dark:text-gray-300 flex flex-wrap gap-x-6 gap-y-2">
           <span>Última corrida: <strong>{new Date(lastRun.started_at).toLocaleString('es-CL')}</strong></span>
           <span>{lastRun.symbols_scanned} papeles en {lastRun.duration_seconds}s</span>
@@ -269,6 +346,8 @@ export default function CoveredCalls() {
         </div>
       )}
 
+      {mode === 'universo' && (
+      <>
       {/* Selector de lectura */}
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-5 space-y-4">
         <div className="flex gap-2 flex-wrap">
@@ -545,6 +624,139 @@ export default function CoveredCalls() {
           </div>
         </div>
       )}
+      </>
+      )}
+    </div>
+  )
+}
+
+// ─── Vista sobre posiciones abiertas ─────────────────────────────────────────
+
+function HoldingsView({
+  positions, loading, onReload,
+}: { positions: HoldingPosition[]; loading: boolean; onReload: () => void }) {
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center gap-3 py-10">
+        <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />
+        <span className="text-gray-600 dark:text-gray-300">Consultando cadenas en vivo...</span>
+      </div>
+    )
+  }
+  if (!positions.length) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-8 text-center text-gray-500 dark:text-gray-400">
+        No tienes posiciones de 100 acciones o más. Un covered call necesita al menos 100.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-end">
+        <button onClick={onReload}
+          className="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+          🔄 Actualizar cotizaciones
+        </button>
+      </div>
+
+      {positions.map(p => (
+        <div key={p.ticker} className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
+          <div className="p-5 border-b border-gray-100 dark:border-gray-700">
+            <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">{p.ticker}</h2>
+              <span className="text-sm text-gray-600 dark:text-gray-300">
+                {p.shares} acciones → <strong>{p.contracts} contratos</strong>
+                {p.uncovered_shares > 0 && (
+                  <span className="text-gray-400"> ({p.uncovered_shares} sin cubrir)</span>
+                )}
+              </span>
+              <span className="text-sm text-gray-600 dark:text-gray-300">
+                Mercado <strong>{usd(p.market_price)}</strong>
+              </span>
+              <span className="text-sm text-gray-600 dark:text-gray-300">
+                Costo real <strong>{usd(p.cost_basis)}</strong>
+                {p.cost_basis_source === 'GROSS' && (
+                  <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">(bruto, sin ajuste por primas)</span>
+                )}
+              </span>
+              <span className={`text-sm font-semibold ${p.vs_cost_basis >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {p.vs_cost_basis >= 0 ? '+' : ''}{(p.vs_cost_basis * 100).toFixed(1)}% sobre tu costo
+              </span>
+            </div>
+            {p.gross_cost !== null && p.cost_basis_source === 'ADJUSTED' && (
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                Costo bruto {usd(p.gross_cost)} menos {usd(p.premium_collected, 0)} de primas cobradas en este ciclo.
+                Los strikes se comparan contra el costo real, que es lo que decide si te deja ganancia.
+              </p>
+            )}
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 dark:bg-gray-700/50 text-xs uppercase text-gray-500 dark:text-gray-400">
+                <tr>
+                  <th className="px-3 py-2 text-right">Strike</th>
+                  <th className="px-3 py-2 text-right">Vence</th>
+                  <th className="px-3 py-2 text-right">DTE</th>
+                  <th className="px-3 py-2 text-right">Bid</th>
+                  <th className="px-3 py-2 text-right" title="Por los {p.contracts} contratos">Prima</th>
+                  <th className="px-3 py-2 text-right" title="Prima sobre tu costo real, anualizada">Anual</th>
+                  <th className="px-3 py-2 text-right" title="Delta como aproximación de terminar dentro del dinero">P(asig)</th>
+                  <th className="px-3 py-2 text-right" title="Solo el capital: (strike - costo real) x acciones">Capital</th>
+                  <th className="px-3 py-2 text-right" title="Capital + prima: lo que cierras si te ejercen">Total ciclo</th>
+                  <th className="px-3 py-2 text-right">Spread</th>
+                  <th className="px-3 py-2 text-right">OI</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                {p.candidates.slice(0, 12).map(c => (
+                  <tr key={c.occ_symbol}
+                    className={`text-gray-700 dark:text-gray-200 ${c.net_loss_if_assigned ? 'bg-red-50 dark:bg-red-900/20' : ''}`}>
+                    <td className="px-3 py-2 text-right font-semibold">
+                      {usd(c.strike)}
+                      {c.below_cost_basis && (
+                        <span className="ml-1.5 text-[10px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300"
+                          title="Bajo tu costo real: la asignación realiza una pérdida de capital">
+                          bajo costo
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right whitespace-nowrap">{c.expiration}</td>
+                    <td className="px-3 py-2 text-right">{c.dte}d</td>
+                    <td className="px-3 py-2 text-right">{usd(c.call_bid)}</td>
+                    <td className="px-3 py-2 text-right font-semibold text-green-600 dark:text-green-400">
+                      {usd(c.position_premium_total, 0)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-bold">{pct(c.annualized_premium_on_cost, 0)}</td>
+                    <td className="px-3 py-2 text-right">{pct(c.assignment_probability, 0)}</td>
+                    <td className={`px-3 py-2 text-right ${c.gain_if_assigned < 0 ? 'text-red-600 dark:text-red-400' : ''}`}>
+                      {c.gain_if_assigned >= 0 ? '+' : ''}{usd(c.gain_if_assigned, 0).replace('$', '$')}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-semibold ${c.net_loss_if_assigned ? 'text-red-600 dark:text-red-400' : 'text-green-700 dark:text-green-300'}`}>
+                      {c.total_if_assigned >= 0 ? '+' : ''}{usd(c.total_if_assigned, 0)}
+                    </td>
+                    <td className="px-3 py-2 text-right">{pct(c.spread_pct, 1)}</td>
+                    <td className="px-3 py-2 text-right">{c.open_interest ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="p-4 bg-amber-50 dark:bg-amber-900/20 text-xs text-amber-700 dark:text-amber-400 space-y-1">
+            <p>
+              <strong>El orden es por prima anualizada</strong>, no por "total ciclo". La apreciación hasta
+              un strike lejano es de la acción que ya tienes — la call no la crea, así que ordenar por ahí
+              premiaría strikes que casi nunca se ejercen y nunca te devuelven el capital.
+            </p>
+            <p>
+              Tú decides el canje: más strike es más capital de vuelta si te asignan, menos strike es más
+              prima ahora y más probabilidad de cerrar el ciclo. Las dos columnas están para eso.
+            </p>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }

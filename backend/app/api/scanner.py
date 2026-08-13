@@ -7,6 +7,7 @@ que el scanner las evalúe después, y por qué las demás no?".
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -14,9 +15,13 @@ from sqlalchemy.orm import Session
 
 from ..database import SessionLocal, get_db
 from ..logging_config import get_logger
-from ..models import CoveredCallCandidate, Instrument, MarketRiskSnapshot, User
+from ..models import CoveredCallCandidate, Instrument, MarketRiskSnapshot, Stock, User
 from ..models.fundamentals import FundamentalSnapshot
+from ..providers.base import ProviderError
+from ..providers.cboe_chains import CboeChainsProvider
 from ..scanner import cc_scan, funnel
+from ..scanner.covered_calls import ChainFilter, evaluate_chain
+from ..scanner.holdings import evaluate_for_holding, rank_for_cycle, resolve_cost_basis
 from ..scanner.cc_scan import PICK_PROFILE_PREFIX
 from ..scanner.scoring import PROFILES, evaluate_gate
 from ..utils.auth import get_current_user
@@ -379,3 +384,77 @@ async def list_covered_call_candidates(
             for c, inst, pasa, razones in evaluados
         ],
     }
+
+
+@router.get("/covered-calls/holdings")
+async def covered_calls_for_holdings(
+    min_dte: int = Query(5, ge=1),
+    max_dte: int = Query(60, ge=1),
+    include_loss_making: bool = Query(True, description="incluir strikes bajo el costo real, marcados"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Covered calls sobre las posiciones que el usuario YA tiene.
+
+    En vivo contra CBOE, no desde `covered_call_candidates`: son pocas
+    posiciones (una consulta por papel) y acá el usuario está por mandar una
+    orden — mostrarle la cadena del último scan programado sería darle precios
+    de hace horas para decidir algo que ejecuta ahora.
+    """
+    posiciones = (
+        db.query(Stock)
+        .filter(Stock.user_id == current_user.id, Stock.is_active == True, Stock.shares >= 100)
+        .order_by(Stock.ticker)
+        .all()
+    )
+
+    provider = CboeChainsProvider()
+    filtro = ChainFilter(
+        min_dte=min_dte, max_dte=max_dte,
+        min_delta=0.05, max_delta=0.60,
+        max_spread_pct=0.35, min_open_interest=1,
+        require_otm=False,   # un strike bajo el precio puede seguir sobre el costo real
+    )
+
+    resultado = []
+    errores = []
+    for stock in posiciones:
+        cost_basis, fuente = resolve_cost_basis(stock)
+        if cost_basis is None:
+            errores.append({"ticker": stock.ticker, "error": "sin costo base registrado"})
+            continue
+        try:
+            quotes, underlying = provider.get_chain(stock.ticker)
+        except ProviderError as exc:
+            errores.append({"ticker": stock.ticker, "error": str(exc)[:200]})
+            continue
+        if underlying.price is None or underlying.price <= 0:
+            errores.append({"ticker": stock.ticker, "error": "CBOE no reportó precio"})
+            continue
+
+        candidatos, _ = evaluate_chain(
+            quotes, underlying.price, date.today(), stock_ask=underlying.ask, filtro=filtro
+        )
+        evaluados = [
+            h for h in (
+                evaluate_for_holding(m, cost_basis, fuente, float(stock.shares)) for m in candidatos
+            )
+            if h is not None and (include_loss_making or not h.realizes_loss)
+        ]
+
+        resultado.append({
+            "ticker": stock.ticker,
+            "shares": float(stock.shares),
+            "contracts": int(stock.shares // 100),
+            "uncovered_shares": float(stock.shares) - int(stock.shares // 100) * 100,
+            "cost_basis": round(cost_basis, 4),
+            "cost_basis_source": fuente,
+            "gross_cost": float(stock.average_cost) if stock.average_cost else None,
+            "premium_collected": float(stock.total_premium_earned or 0),
+            "market_price": underlying.price,
+            "vs_cost_basis": round((underlying.price - cost_basis) / cost_basis, 6),
+            "quote_as_of": underlying.as_of.isoformat(),
+            "candidates": [h.as_dict() for h in rank_for_cycle(evaluados)],
+        })
+
+    return {"positions": resultado, "errors": errores}
