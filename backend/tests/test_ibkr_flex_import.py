@@ -86,6 +86,41 @@ class GroupDedupeBidirectionalTests(unittest.TestCase):
         parsed, _ = build_parsed_transactions(raw_rows, set(), None, existing_groups)
         self.assertTrue(all(p.duplicado for p in parsed))
 
+    def test_incoming_batch_with_extra_new_order_still_marks_the_aggregate(self):
+        """El lote entrante trae la fila agregada de una orden YA en BD (fragmentada)
+        más una orden genuinamente nueva del mismo ticker/fecha/tipo. Comparar suma
+        entrante contra suma de BD deja pasar el duplicado: 4/$40 + 1/$10 = 5/$50 no
+        calza con 4/$40 y ninguna fila queda marcada. La comparación fila-a-grupo sí
+        lo pesca, sin marcar de más la orden nueva."""
+        existing_groups = {("BTBT", "2026-05-11", "SELL_CALL"): {"qty_sum": 4.0, "total_sum": 40.0, "count": 2}}
+        raw_rows = self._fragmented_rows([(4, 40.0), (1, 10.0)])
+
+        parsed, _ = build_parsed_transactions(raw_rows, set(), None, existing_groups)
+
+        agregada = next(p for p in parsed if p.cantidad == 4.0)
+        nueva = next(p for p in parsed if p.cantidad == 1.0)
+        self.assertTrue(agregada.duplicado)
+        self.assertEqual(agregada.duplicado_metodo, "grupo_agregado")
+        self.assertFalse(nueva.duplicado)
+
+    def test_rows_already_caught_by_hash_still_count_toward_the_group_sum(self):
+        """BD tiene la orden agregada (4/$40) más otra fila suelta (3/$30); Flex trae
+        los fills fragmentados de la primera (2+2) y la segunda idéntica. La idéntica
+        la pesca el hash exacto, pero sigue sumando para el match de grupo — el grupo
+        de BD también la incluye. Sacarla de un solo lado descuadraría el match y los
+        fragmentos se importarían duplicados."""
+        existing_groups = {("BTBT", "2026-05-11", "SELL_CALL"): {"qty_sum": 7.0, "total_sum": 70.0, "count": 2}}
+        existing_hashes = {("BTBT", "2026-05-11", "SELL_CALL", 30.0, 3.0)}
+        raw_rows = self._fragmented_rows([(2, 20.0), (2, 20.0), (3, 30.0)])
+
+        parsed, _ = build_parsed_transactions(raw_rows, existing_hashes, None, existing_groups)
+
+        self.assertTrue(all(p.duplicado for p in parsed))
+        self.assertEqual(
+            sorted(p.duplicado_metodo for p in parsed),
+            ["grupo_agregado", "grupo_agregado", "hash_exacto"],
+        )
+
 
 # ─── Adaptador: BrokerExecution -> raw_row ─────────────────────────────────────
 
@@ -129,6 +164,36 @@ class BrokerExecutionAdapterTests(unittest.TestCase):
     def test_cancellation_code_is_dropped(self):
         execution = make_execution(codes=["Ca"])
         self.assertIsNone(broker_execution_to_raw_row(execution, 1))
+
+    def test_dropped_cancellations_leave_no_gaps_in_line_numbers(self):
+        """preview-flex renumera las filas de efectivo desde el "line" más alto de
+        los trades. Si los trades dejaran huecos (numerando sobre las ejecuciones en
+        vez de sobre las filas que quedan), dos filas terminarían con el mismo ib_row
+        y "Forzar esta fila" desmarcaría las dos: un dividendo forzado arrastraría un
+        trade sin relación, que se importaría duplicado en silencio."""
+        executions = [
+            make_execution(external_id="1"),
+            make_execution(external_id="2", codes=["Ca"]),
+            make_execution(external_id="3", codes=["Ca"]),
+            make_execution(external_id="4"),
+            make_execution(external_id="5"),
+        ]
+        trade_rows, _ = broker_executions_to_raw_rows(executions)
+
+        lines = [r["line"] for r in trade_rows]
+        self.assertEqual(lines, [1, 2, 3])
+
+        cash_rows, _ = broker_cash_to_raw_rows([
+            BrokerCashTransaction(external_id="c1", account_id="U1", type="Dividends",
+                                  symbol="MSFT", amount=12.0, settle_date=date(2026, 5, 20),
+                                  executed_at_utc=None),
+        ])
+        offset = max((r["line"] for r in trade_rows), default=0)
+        for i, row in enumerate(cash_rows, start=1):
+            row["line"] = offset + i
+
+        all_lines = [r["line"] for r in trade_rows + cash_rows]
+        self.assertEqual(len(all_lines), len(set(all_lines)))
 
     def test_expiration_produces_option_expiry_without_spurious_price_warning(self):
         execution = make_execution(

@@ -832,13 +832,18 @@ def build_parsed_transactions(
     Convierte las filas crudas en ParsedTransaction.
     existing_hashes: set de (ticker, fecha_str, tipo, total) ya en BD → para detectar duplicados.
 
-    El fallback de grupo (fills fragmentados vs. fila agregada) es simétrico:
-    se agrupan tanto las filas ya en BD como las filas entrantes de esta
-    importación por (ticker, fecha, tipo) y se comparan las sumas — sin
-    importar de qué lado está fragmentada la orden. Antes solo cubría BD
-    fragmentada + fila entrante agregada (una fuente CSV/manual siempre trae
-    una fila por orden); IBKR Flex puede entregar fills fragmentados contra
-    una BD que ya tiene la fila agregada, el caso inverso. Ver
+    El fallback de grupo (fills fragmentados vs. fila agregada) cubre las dos
+    direcciones, pero con dos comparaciones distintas, no con una simétrica:
+
+      A) BD fragmentada + fila entrante agregada — fila contra suma del grupo
+         de BD (el caso original del CSV/pegado manual).
+      B) BD agregada + fills entrantes fragmentados — suma del residuo
+         entrante contra la suma del grupo de BD (el caso de IBKR Flex).
+
+    Comparar suma entrante contra suma de BD para ambos casos parece la
+    generalización natural y no lo es: si el lote entrante trae además una
+    orden genuinamente nueva del mismo (ticker, fecha, tipo), la suma deja de
+    calzar y el duplicado del caso A pasa sin marcar. Ver
     wiki/projects/kover/bugs/duplicado-btbt-import-manual-csv.md.
     """
     errors: list[str] = []
@@ -996,49 +1001,74 @@ def build_parsed_transactions(
             "es_asignacion": es_asignacion,
         })
 
-    # ── Pasada 2: agrupar las filas ENTRANTES por (ticker, fecha, tipo) ────────
-    # Mismo agrupamiento que build_existing_hashes aplica sobre la BD.
-    incoming_groups: dict[tuple[str, str, str], dict] = {}
+    # ── Pasada 2: indexar las filas ENTRANTES por (ticker, fecha, tipo) ───────
+    # Misma clave que build_existing_hashes aplica sobre la BD.
+    incoming_by_key: dict[tuple[str, str, str], list[dict]] = {}
     for row in staged:
-        key = (row["ticker"], row["dt"].strftime("%Y-%m-%d"), row["tipo"].value)
-        g = incoming_groups.setdefault(key, {"qty_sum": 0.0, "total_sum": 0.0, "count": 0})
-        g["qty_sum"] += row["cantidad"]
-        g["total_sum"] += row["total_usd"]
-        g["count"] += 1
+        row["group_key"] = (row["ticker"], row["dt"].strftime("%Y-%m-%d"), row["tipo"].value)
+        incoming_by_key.setdefault(row["group_key"], []).append(row)
 
-    # ── Pasada 3: decidir duplicado (hash exacto → cierre cero → grupo) ────────
-    results: list[ParsedTransaction] = []
+    # ── Pasada 3a: hash exacto → cierre cero → fila contra grupo de BD ────────
     for row in staged:
         ticker, tipo, dt = row["ticker"], row["tipo"], row["dt"]
         cantidad, total_usd = row["cantidad"], row["total_usd"]
 
         sig = (ticker, dt.strftime("%Y-%m-%d"), tipo.value, round(total_usd, 2), round(cantidad, 4))
-        duplicado = sig in existing_hashes
-        duplicado_metodo = "hash_exacto" if duplicado else None
+        row["duplicado"] = sig in existing_hashes
+        row["duplicado_metodo"] = "hash_exacto" if row["duplicado"] else None
 
         # Fallback: cierres de opción sin valor (OPTION_EXPIRY / BUY_CALL / BUY_PUT a $0)
         # pueden estar ya en BD bajo otro tipo y/o con fecha de liquidación distinta.
-        if not duplicado and tipo.value in ZERO_VALUE_CLOSE_TYPES and round(total_usd, 2) == 0.0:
+        if not row["duplicado"] and tipo.value in ZERO_VALUE_CLOSE_TYPES and round(total_usd, 2) == 0.0:
             for existing_dt in zero_closes.get((ticker, round(cantidad, 4)), []):
                 if abs((existing_dt.date() - dt.date()).days) <= ZERO_CLOSE_DATE_MARGIN_DAYS:
-                    duplicado = True
-                    duplicado_metodo = "cierre_cero"
+                    row["duplicado"] = True
+                    row["duplicado_metodo"] = "cierre_cero"
                     break
 
-        # Fallback: la misma orden puede estar repartida en varias filas (fills
-        # parciales) de un lado y agregada del otro — no importa cuál lado (BD o
-        # esta importación) esté fragmentado, solo que la suma calce.
-        if not duplicado:
-            key = (ticker, dt.strftime("%Y-%m-%d"), tipo.value)
-            existing_group = groups.get(key)
-            incoming_group = incoming_groups.get(key)
+        # Fallback A: la orden está fragmentada en BD y esta fila trae el
+        # agregado. La comparación es fila contra grupo, nunca grupo contra
+        # grupo: el lote entrante puede traer además órdenes genuinamente
+        # nuevas del mismo (ticker, fecha, tipo), y sumarlas rompería el match
+        # dejando pasar el duplicado. Ver test_incoming_batch_with_extra_new_order.
+        if not row["duplicado"]:
+            group = groups.get(row["group_key"])
             if (
-                existing_group and incoming_group
-                and round(existing_group["qty_sum"], 4) == round(incoming_group["qty_sum"], 4)
-                and round(existing_group["total_sum"], 2) == round(incoming_group["total_sum"], 2)
+                group and group["count"] > 1
+                and round(group["qty_sum"], 4) == round(cantidad, 4)
+                and round(group["total_sum"], 2) == round(total_usd, 2)
             ):
-                duplicado = True
-                duplicado_metodo = "grupo_agregado"
+                row["duplicado"] = True
+                row["duplicado_metodo"] = "grupo_agregado"
+
+    # ── Pasada 3b: fallback B — BD agregada, lote entrante fragmentado ────────
+    # El caso inverso al anterior (IBKR Flex entrega fills individuales contra
+    # una BD que ya tiene la fila agregada del CSV). La suma se toma sobre
+    # TODAS las filas entrantes del grupo —incluidas las que ya se marcaron—
+    # porque el grupo de BD también las incluye: dejar fuera un lado y no el
+    # otro descuadra el match. Lo que sí se restringe es a quién se marca:
+    # solo las filas que ningún método anterior alcanzó.
+    for key, rows_of_key in incoming_by_key.items():
+        group = groups.get(key)
+        if not group:
+            continue
+        sin_marcar = [r for r in rows_of_key if not r["duplicado"]]
+        if not sin_marcar:
+            continue
+        if (
+            round(group["qty_sum"], 4) == round(sum(r["cantidad"] for r in rows_of_key), 4)
+            and round(group["total_sum"], 2) == round(sum(r["total_usd"] for r in rows_of_key), 2)
+        ):
+            for r in sin_marcar:
+                r["duplicado"] = True
+                r["duplicado_metodo"] = "grupo_agregado"
+
+    # ── Pasada 3c: construir el resultado ────────────────────────────────────
+    results: list[ParsedTransaction] = []
+    for row in staged:
+        ticker, tipo = row["ticker"], row["tipo"]
+        cantidad, total_usd = row["cantidad"], row["total_usd"]
+        duplicado, duplicado_metodo = row["duplicado"], row["duplicado_metodo"]
 
         results.append(ParsedTransaction(
             ib_row=row["line"],
@@ -1131,9 +1161,17 @@ def broker_execution_to_raw_row(execution: BrokerExecution, line: int) -> Option
 
 
 def broker_executions_to_raw_rows(executions: list[BrokerExecution]) -> tuple[list[dict], list[str]]:
+    """Numera "line" sobre las filas que quedan, no sobre las ejecuciones.
+
+    Enumerar las ejecuciones dejaría huecos donde se descartó una cancelación,
+    y entonces el último "line" sería mayor que len(rows) — el offset con que
+    se renumeran las filas de efectivo en preview-flex, que chocaría contra
+    esas líneas altas. Dos filas con el mismo ib_row hacen que "Forzar esta
+    fila" desmarque las dos.
+    """
     rows: list[dict] = []
-    for idx, execution in enumerate(executions, start=1):
-        row = broker_execution_to_raw_row(execution, idx)
+    for execution in executions:
+        row = broker_execution_to_raw_row(execution, len(rows) + 1)
         if row is not None:
             rows.append(row)
     return rows, []
@@ -1310,8 +1348,10 @@ async def preview_flex_import(
             # Cada adaptador numera "line" desde 1 por su cuenta; al combinar
             # ambas listas hay que renumerar para que ib_row sea único (el
             # frontend lo usa como key de fila y como identificador del
-            # checkbox de "forzar importación").
-            offset = len(trade_rows)
+            # checkbox de "forzar importación"). El offset sale del "line" más
+            # alto ya asignado, no de len(trade_rows): así no depende de que
+            # el adaptador numere sin huecos.
+            offset = max((row["line"] for row in trade_rows), default=0)
             for i, row in enumerate(cash_rows, start=1):
                 row["line"] = offset + i
 
