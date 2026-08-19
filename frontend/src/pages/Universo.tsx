@@ -124,7 +124,7 @@ function Funnel({ run }: { run: LastRun }) {
           hint={`−${f.excluded_etf} ETF, −${f.excluded_test_issue} test, −${f.excluded_not_common} otros`}
         />
         <FunnelStep
-          label="Precio US$10–20"
+          label="Precio US$5–20"
           value={f.price_in_range}
           of={f.listing_passed}
           hint={`−${f.price_out_of_range} fuera de banda, −${f.price_no_data} sin datos`}
@@ -231,7 +231,7 @@ export default function Universo() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">🔭 Universo</h1>
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            Acciones US$10–20, optionables y con liquidez — Stage 1-3 del scanner de covered calls.
+            Acciones US$5–20, optionables y con liquidez — Stage 1-3 del scanner de covered calls.
           </p>
         </div>
         <button

@@ -1,4 +1,4 @@
-"""Stage 1 del scanner: universo optionable US$10–20 con liquidez.
+"""Stage 1 del scanner: universo optionable US$5–20 con liquidez.
 
 Tres pasadas, cada una más cara que la anterior y sobre un conjunto más chico:
 
@@ -30,7 +30,7 @@ from ..providers.cboe_optionable import CboeOptionableProvider
 
 logger = get_logger(__name__)
 
-PRICE_MIN = 10.0
+PRICE_MIN = 5.0
 PRICE_MAX = 20.0
 AVG_DAILY_VOLUME_MIN = 500_000
 AVG_DOLLAR_VOLUME_MIN = 10_000_000

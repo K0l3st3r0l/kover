@@ -86,7 +86,7 @@ def start_scheduler() -> Optional[BackgroundScheduler]:
         misfire_grace_time=7200,
     )
 
-    # Universo $10-20 optionable + riesgo de mercado (K3). Antes que
+    # Universo $5-20 optionable + riesgo de mercado (K3). Antes que
     # fundamentals_refresh: deja el universo fresco por si esa tarea se
     # extiende a cubrirlo más adelante. Puede tardar varios minutos (lote de
     # precios + chequeo de optionabilidad + barras de 6 meses), por eso el
