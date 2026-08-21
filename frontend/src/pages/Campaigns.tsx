@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../services/api'
+import PageActions from '../components/PageActions'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -420,13 +421,7 @@ export default function Campaigns() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Campañas</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            La vida completa de cada bloque de acciones: compra, calls vendidas y cierre.
-          </p>
-        </div>
+      <PageActions>
         <button
           onClick={rebuild}
           disabled={rebuilding}
@@ -434,7 +429,7 @@ export default function Campaigns() {
         >
           {rebuilding ? 'Reconstruyendo…' : 'Reconstruir desde transacciones'}
         </button>
-      </div>
+      </PageActions>
 
       {summary && (
         <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">

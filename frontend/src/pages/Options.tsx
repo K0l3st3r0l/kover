@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import api from '../services/api';
+import PageActions from '../components/PageActions';
 
 interface Stock {
   id: number;
@@ -315,12 +316,8 @@ function Options() {
 
   return (
     <>
-    <div className="page space-y-6">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Mis Opciones</h1>
-          <p className="page-subtitle">Covered Calls y Cash Secured Puts</p>
-        </div>
+    <div className="space-y-6">
+      <PageActions>
         <div className="flex gap-2">
           <button
             onClick={handleExportCSV}
@@ -339,7 +336,7 @@ function Options() {
             {showForm ? 'Cancelar' : '+ Registrar Opción'}
           </button>
         </div>
-      </div>
+      </PageActions>
 
       {stocks.length === 0 && (
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">

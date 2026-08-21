@@ -183,7 +183,7 @@ function ExpirationAlerts() {
       
       <div className="mt-4 flex justify-end">
         <Link 
-          to="/options" 
+          to="/opciones/posiciones" 
           className="text-sm font-medium text-blue-600 hover:text-blue-800 transition"
         >
           Ver todas las opciones →

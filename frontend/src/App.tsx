@@ -19,7 +19,7 @@ import Dividends from './pages/Dividends'
 import Campaigns from './pages/Campaigns'
 import Fundamentals from './pages/Fundamentals'
 import Universo from './pages/Universo'
-import CoveredCalls from './pages/CoveredCalls'
+import Opciones, { BuscarTab } from './pages/Opciones'
 
 function PrivateRoute({ children }: { children: JSX.Element }) {
   const { user, isLoading } = useAuth()
@@ -36,16 +36,11 @@ function PrivateRoute({ children }: { children: JSX.Element }) {
 const NAV_LINKS = [
   { to: '/',             exact: true,  label: 'Dashboard' },
   { to: '/stocks',       exact: false, label: 'Stocks' },
-  { to: '/options',      exact: false, label: 'Options' },
-  { to: '/campaigns',    exact: false, label: 'Campañas' },
+  { to: '/opciones',     exact: false, label: 'Opciones' },
   { to: '/transactions', exact: false, label: 'Historial' },
   { to: '/watchlist',    exact: false, label: 'Watchlist' },
-  { to: '/calculator',   exact: false, label: 'Calculadora' },
 ]
 const NAV_EXTRA = [
-  { to: '/covered-calls', label: '🎯 Covered Calls' },
-  { to: '/universo',      label: '🔭 Universo' },
-  { to: '/fundamentales', label: '🔎 Fundamentales' },
   { to: '/noticias',    label: '📰 Noticias' },
   { to: '/dividendos',  label: '💰 Dividendos' },
   { to: '/tax-report',  label: '🇨🇱 Fiscal' },
@@ -312,20 +307,33 @@ function AppContent() {
         <Routes>
           <Route path="/"             element={<PrivateRoute><Dashboard /></PrivateRoute>} />
           <Route path="/stocks"       element={<PrivateRoute><Stocks /></PrivateRoute>} />
-          <Route path="/options"      element={<PrivateRoute><Options /></PrivateRoute>} />
           <Route path="/transactions" element={<PrivateRoute><Transactions /></PrivateRoute>} />
           <Route path="/watchlist"    element={<PrivateRoute><Watchlist /></PrivateRoute>} />
-          <Route path="/calculator"   element={<PrivateRoute><Calculator /></PrivateRoute>} />
+
+          {/* Sección Opciones: una pestaña por momento del flujo. */}
+          <Route path="/opciones" element={<PrivateRoute><Opciones /></PrivateRoute>}>
+            <Route index element={<Navigate to="/opciones/buscar" replace />} />
+            <Route path="buscar"               element={<BuscarTab />} />
+            <Route path="buscar/universo"      element={<Universo />} />
+            <Route path="buscar/fundamentales" element={<Fundamentals />} />
+            <Route path="simular"              element={<Calculator />} />
+            <Route path="posiciones"           element={<Options />} />
+            <Route path="resultados"           element={<Campaigns />} />
+          </Route>
+
+          {/* Rutas anteriores: se conservan para no romper enlaces guardados. */}
+          <Route path="/options"       element={<Navigate to="/opciones/posiciones" replace />} />
+          <Route path="/calculator"    element={<Navigate to="/opciones/simular" replace />} />
+          <Route path="/campaigns"     element={<Navigate to="/opciones/resultados" replace />} />
+          <Route path="/covered-calls" element={<Navigate to="/opciones/buscar" replace />} />
+          <Route path="/universo"      element={<Navigate to="/opciones/buscar/universo" replace />} />
+          <Route path="/fundamentales" element={<Navigate to="/opciones/buscar/fundamentales" replace />} />
           <Route path="/tax-report"   element={<PrivateRoute><TaxReport /></PrivateRoute>} />
           <Route path="/import-ib"    element={<PrivateRoute><ImportIB /></PrivateRoute>} />
           <Route path="/mercado-cl"   element={<PrivateRoute><ChileanMarkets /></PrivateRoute>} />
           <Route path="/noticias"     element={<PrivateRoute><News /></PrivateRoute>} />
           <Route path="/noticias/calendario" element={<PrivateRoute><MacroCalendar /></PrivateRoute>} />
           <Route path="/dividendos"   element={<PrivateRoute><Dividends /></PrivateRoute>} />
-          <Route path="/campaigns"    element={<PrivateRoute><Campaigns /></PrivateRoute>} />
-          <Route path="/fundamentales" element={<PrivateRoute><Fundamentals /></PrivateRoute>} />
-          <Route path="/covered-calls" element={<PrivateRoute><CoveredCalls /></PrivateRoute>} />
-          <Route path="/universo"      element={<PrivateRoute><Universo /></PrivateRoute>} />
           <Route path="/change-password" element={<PrivateRoute><ChangePassword /></PrivateRoute>} />
         </Routes>
       </main>

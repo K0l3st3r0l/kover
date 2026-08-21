@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../services/api'
+import PageActions from '../components/PageActions'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -268,13 +269,7 @@ export default function Fundamentals() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Fundamentales</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Datos de SEC EDGAR, trazables al filing de origen.
-          </p>
-        </div>
+      <PageActions>
         <form onSubmit={submit} className="flex gap-2">
           <input
             value={input}
@@ -294,7 +289,7 @@ export default function Fundamentals() {
             {refreshing ? 'Descargando…' : 'Actualizar desde SEC'}
           </button>
         </form>
-      </div>
+      </PageActions>
 
       {error && (
         <div className="rounded-lg border border-amber-300 dark:border-amber-700/60 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">

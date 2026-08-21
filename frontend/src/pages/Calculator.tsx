@@ -302,15 +302,7 @@ function Calculator() {
   // --- end Broker Data state ---
 
   return (
-    <div className="page">
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">Calculadora de Opciones</h1>
-          <p className="page-subtitle">Analiza y compara estrategias con datos reales de tu broker</p>
-        </div>
-      </div>
-
-      <div className="space-y-6">
+    <div className="space-y-6">
 
           {/* Roll confirmation modal */}
           {rollConfirm && rollOption && (
@@ -992,7 +984,6 @@ function Calculator() {
               Ingresa el precio actual de la acción para comenzar.
             </div>
           )}
-      </div>
     </div>
   )
 }

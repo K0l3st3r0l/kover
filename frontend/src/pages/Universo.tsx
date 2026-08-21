@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import api from '../services/api'
+import PageActions from '../components/PageActions'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -226,14 +227,8 @@ export default function Universo() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">🔭 Universo</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            Acciones US$5–20, optionables y con liquidez — Stage 1-3 del scanner de covered calls.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageActions>
         <button
           onClick={triggerRun}
           disabled={running}
@@ -241,7 +236,7 @@ export default function Universo() {
         >
           {running ? 'Corriendo… (puede tardar varios minutos)' : 'Correr ahora'}
         </button>
-      </div>
+      </PageActions>
 
       {error && (
         <div className="bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 rounded-lg p-3 text-sm">{error}</div>

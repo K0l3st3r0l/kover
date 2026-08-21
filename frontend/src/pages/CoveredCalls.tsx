@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import api from '../services/api'
+import PageActions from '../components/PageActions'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -286,16 +287,8 @@ export default function CoveredCalls() {
   const pick = PICK_LABELS[pickType]
 
   return (
-    <div className="max-w-[1600px] mx-auto px-4 py-8 space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">🎯 Covered Calls</h1>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Cadenas reales de CBOE sobre el universo calificado. Se compra la acción al ask y se vende
-            la call al bid — el peor lado de ambos spreads, para que el número no prometa más de lo
-            que se puede ejecutar.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <PageActions>
         <button
           onClick={runScan}
           disabled={running}
@@ -303,7 +296,7 @@ export default function CoveredCalls() {
         >
           {running ? '⏳ Escaneando...' : '🔄 Escanear ahora'}
         </button>
-      </div>
+      </PageActions>
 
       <div className="flex gap-2">
         {[
