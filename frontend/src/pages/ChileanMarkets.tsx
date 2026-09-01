@@ -60,6 +60,15 @@ const FUND_NAMES: Record<string, string> = {
   E: 'Fondo E',
 }
 
+function committeeModelLabel(id: string) {
+  if (!id) return id
+  if (id.includes('gpt-5.6-luna')) return 'GPT-5.6 Luna'
+  if (id.includes('deepseek-v4-pro')) return 'DeepSeek V4 Pro'
+  if (id.includes('glm-5.3-flash')) return 'GLM 5.3 Flash'
+  if (id.includes('minimax')) return 'MiniMax'
+  return id
+}
+
 // ─── AFP Chart ────────────────────────────────────────────────────────────────
 
 function formatDate(dateStr: string) {
@@ -216,6 +225,15 @@ export default function ChileanMarkets() {
     fetchMacro()
     fetchAiCommittee()
   }, [fetchSignalData, fetchMacro, fetchAiCommittee])
+
+  useEffect(() => {
+    const waiting =
+      aiCommittee?.status === 'generating' ||
+      (aiCommittee?.stale && aiCommittee?.status === 'ready' && !aiCommittee?.last_error)
+    if (!waiting) return
+    const id = setInterval(() => { fetchAiCommittee() }, 20000)
+    return () => clearInterval(id)
+  }, [aiCommittee?.status, aiCommittee?.stale, aiCommittee?.last_error, fetchAiCommittee])
 
   const toggleFund = (fund: string) => {
     setActiveFunds(prev => {
@@ -1206,7 +1224,11 @@ export default function ChileanMarkets() {
                   </div>
                 ) : (
                   <div className="rounded-xl bg-gray-50 dark:bg-gray-700/50 border border-gray-100 dark:border-gray-700 px-4 py-4 text-xs text-gray-400 dark:text-gray-500 italic">
-                    {aiCommittee?.status === 'generating' ? 'Comité de IA generando veredicto...' : 'Distribución sugerida del comité de IA no disponible aún.'}
+                    {aiCommittee?.status === 'generating'
+                      ? 'Comité de IA generando veredicto...'
+                      : aiCommittee?.stale
+                        ? 'El veredicto del comité está vencido y se está regenerando.'
+                        : 'Distribución sugerida del comité de IA no disponible aún.'}
                   </div>
                 )}
               </div>
@@ -1241,23 +1263,34 @@ export default function ChileanMarkets() {
               🤖 Comité de IA Multi-Modelo
             </h2>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-              Dos analistas (DeepSeek, MiniMax) analizan los datos en paralelo y un árbitro independiente (GLM) contrasta ambos veredictos.
+              Dos analistas (GPT-5.6 Luna, DeepSeek V4 Pro) analizan los datos en paralelo y un árbitro independiente (GLM 5.3 Flash) contrasta ambos veredictos.
               {aiCommittee.generated_at && ` Generado: ${new Date(aiCommittee.generated_at).toLocaleString('es-CL')}.`}
             </p>
           </div>
 
+          {aiCommittee.stale && (
+            <div className="mb-4 rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200">
+              <p className="font-semibold">Veredicto vencido — se regenera en segundo plano.</p>
+              {aiCommittee.last_error && (
+                <p className="mt-1 text-amber-700 dark:text-amber-300">
+                  Último intento: {aiCommittee.last_error}
+                </p>
+              )}
+            </div>
+          )}
+
           {aiCommittee.status === 'generating' && (
             <div className="text-sm text-gray-500 dark:text-gray-400">
-              Generando el primer análisis del comité (puede tardar unos minutos)… refresca la página más tarde.
+              Generando el primer análisis del comité (puede tardar varios minutos)… esta página se actualiza sola.
             </div>
           )}
 
           {aiCommittee.status === 'ready' && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {aiCommittee.analysts.map((a: any) => (
+                {(aiCommittee.analysts || []).map((a: any) => (
                   <div key={a.model} className="rounded-lg border border-gray-100 dark:border-gray-700 p-3">
-                    <p className="text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">{a.model}</p>
+                    <p className="text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">{committeeModelLabel(a.model)}</p>
                     {a.parsed ? (
                       <>
                         <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 mb-1">{a.parsed.regimen}</p>
@@ -1279,7 +1312,7 @@ export default function ChileanMarkets() {
 
               {aiCommittee.arbiter?.parsed && (
                 <div className="rounded-lg border-2 border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-4">
-                  <p className="text-xs font-bold text-blue-700 dark:text-blue-300 mb-2">⚖️ Veredicto del árbitro ({aiCommittee.arbiter.model})</p>
+                  <p className="text-xs font-bold text-blue-700 dark:text-blue-300 mb-2">⚖️ Veredicto del árbitro ({committeeModelLabel(aiCommittee.arbiter.model)})</p>
 
                   <div className="flex gap-1.5 mb-3">
                     {aiCommittee.arbiter.parsed.decision_final?.distribucion?.map((d: any) => (

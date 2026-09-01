@@ -31,8 +31,9 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-kover}
       SECRET_KEY: ${SECRET_KEY:-changeme}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      AI_API_URL: ${AI_API_URL:-https://opencode.ai/zen/go}
-      AI_API_KEY: ${AI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      AI_API_URL: ${AI_API_URL:-https://openrouter.ai/api/v1}
+      AI_API_KEY: ${OPENROUTER_API_KEY:-${AI_API_KEY:-}}
       ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY:-}
       FRED_API_KEY: ${FRED_API_KEY:-}
       # SEC exige un User-Agent identificable; sin esto el provider falla en vez

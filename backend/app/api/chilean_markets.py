@@ -70,17 +70,22 @@ CARTERA_CACHE_DIR = Path(os.getenv("CARTERA_CACHE_DIR", "/app/cache/cartera"))
 CARTERA_REQUEST_DELAY = 1.5    # seg entre requests (sitio gubernamental, conservador)
 CARTERA_MAX_MONTHS_BACK = 4    # la publicación tiene rezago de ~1-2 meses
 
-# -- Comité de IA multi-modelo (OpenCode Zen gateway, cuota OpenCode Go) ------
-AI_API_URL = os.getenv("AI_API_URL", "https://opencode.ai/zen/go")
-AI_API_KEY = os.getenv("AI_API_KEY", "")
+# -- Comité de IA multi-modelo (OpenRouter) -----------------------------------
+# Analistas: GPT-5.6 Luna max + DeepSeek V4 Pro 0813 max.
+# Árbitro: GLM 5.3 Flash max. Ver wiki/projects/kover/decisions/ai-committee-afp.md
+AI_API_URL = os.getenv("AI_API_URL", "https://openrouter.ai/api/v1").rstrip("/")
+AI_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("AI_API_KEY", "")
+AI_HTTP_REFERER = os.getenv("AI_HTTP_REFERER", "https://kover.laravas.com")
+AI_APP_TITLE = os.getenv("AI_APP_TITLE", "Kover AFP Committee")
 
-# Modelos que usan endpoint Anthropic (/messages) en vez de OpenAI (/chat/completions)
-AI_ANTHROPIC_PREFIXES = ["minimax", "qwen"]
-
-AI_ANALYST_MODELS = ["deepseek-v4-pro", "minimax-m3"]
-AI_ARBITER_MODEL = "glm-5.1"
+AI_ANALYST_MODELS = ["openai/gpt-5.6-luna", "deepseek/deepseek-v4-pro-0813"]
+AI_ARBITER_MODEL = "z-ai/glm-5.3-flash"
+AI_REASONING_EFFORT = "max"
 AI_INVESTMENT_HORIZON_YEARS = 15
+AI_CALL_TIMEOUT_SECONDS = 600
+AI_MAX_TOKENS = 16000
 AI_COMMITTEE_CACHE_PATH = Path(os.getenv("AI_COMMITTEE_CACHE_DIR", "/app/cache")) / "ai_committee.json"
+AI_COMMITTEE_META_PATH = Path(os.getenv("AI_COMMITTEE_CACHE_DIR", "/app/cache")) / "ai_committee_meta.json"
 AI_COMMITTEE_TTL_SECONDS = 24 * 60 * 60
 
 _ai_committee_lock = threading.Lock()
@@ -742,62 +747,88 @@ def _strip_json_fences(text: str) -> str:
     return text.strip()
 
 
+def _parse_model_json(text: str) -> Optional[dict]:
+    if not text:
+        return None
+    cleaned = _strip_json_fences(text)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(cleaned[start : end + 1])
+                return parsed if isinstance(parsed, dict) else None
+            except (json.JSONDecodeError, ValueError):
+                return None
+    return None
+
+
+def _message_text(message: dict) -> str:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") in (None, "text") and block.get("text"):
+                    parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        content = "".join(parts)
+    return (content or "").strip()
+
+
+def _ai_completions_url() -> str:
+    if AI_API_URL.endswith("/chat/completions"):
+        return AI_API_URL
+    return f"{AI_API_URL}/chat/completions"
+
+
 def _ai_call_openai(model: str, system: str, user: str, reasoning_effort: Optional[str] = None) -> str:
     body = {
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "temperature": 0.1,
-        "max_tokens": 8000,
+        "max_tokens": AI_MAX_TOKENS,
     }
     if reasoning_effort:
+        body["reasoning"] = {"effort": reasoning_effort}
         body["reasoning_effort"] = reasoning_effort
     resp = requests.post(
-        f"{AI_API_URL}/v1/chat/completions",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {AI_API_KEY}"},
-        json=body,
-        timeout=240,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"].get("content") or ""
-
-
-def _ai_call_anthropic(model: str, system: str, user: str) -> str:
-    resp = requests.post(
-        f"{AI_API_URL}/v1/messages",
+        _ai_completions_url(),
         headers={
             "Content-Type": "application/json",
-            "x-api-key": AI_API_KEY,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {AI_API_KEY}",
+            "HTTP-Referer": AI_HTTP_REFERER,
+            "X-Title": AI_APP_TITLE,
         },
-        json={
-            "model": model,
-            "system": system,
-            "messages": [{"role": "user", "content": user}],
-            "max_tokens": 8000,
-        },
-        timeout=240,
+        json=body,
+        timeout=AI_CALL_TIMEOUT_SECONDS,
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(
+            f"{resp.status_code} {resp.reason} for {model}: {(resp.text or '')[:400]}"
+        )
     data = resp.json()
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            return block.get("text") or ""
-    return ""
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    text = _message_text(message)
+    if not text:
+        finish = choice.get("finish_reason") or choice.get("native_finish_reason")
+        logger.warning(f"AI committee: {model} devolvió content vacío (finish_reason={finish})")
+    return text
 
 
 def _ai_run_model(model: str, system: str, user: str) -> dict:
-    is_anthropic = any(model.lower().startswith(p) for p in AI_ANTHROPIC_PREFIXES)
-    raw = (
-        _ai_call_anthropic(model, system, user)
-        if is_anthropic
-        else _ai_call_openai(model, system, user, reasoning_effort="high" if "deepseek" in model else None)
-    )
     try:
-        return {"model": model, "parsed": json.loads(_strip_json_fences(raw)), "raw": raw}
-    except (json.JSONDecodeError, ValueError):
-        logger.warning(f"AI committee: no se pudo parsear JSON de {model}")
-        return {"model": model, "parsed": None, "raw": raw}
+        raw = _ai_call_openai(model, system, user, reasoning_effort=AI_REASONING_EFFORT)
+        parsed = _parse_model_json(raw)
+        if parsed is None:
+            logger.warning(f"AI committee: no se pudo parsear JSON de {model}")
+        return {"model": model, "parsed": parsed, "raw": raw}
+    except Exception as e:
+        logger.error(f"AI committee: fallo llamando {model}: {e}")
+        return {"model": model, "parsed": None, "raw": "", "error": str(e)}
 
 
 _URGENCY_FIELDS_SPEC = (
@@ -851,6 +882,9 @@ _ARBITER_OUTPUT_SCHEMA = (
 
 
 def generate_ai_committee() -> dict:
+    if not AI_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY / AI_API_KEY no configurada")
+
     ctx = _build_ai_market_context()
     data_text = _ai_context_to_text(ctx)
     analyst_user = f"Datos actuales:\n{data_text}\n\nEntrega tu análisis y la distribución sugerida. {_ANALYST_OUTPUT_SCHEMA}"
@@ -861,17 +895,29 @@ def generate_ai_committee() -> dict:
             AI_ANALYST_MODELS,
         ))
 
+    usable = [r for r in analyst_results if r.get("raw") or r.get("parsed")]
+    if not usable:
+        errors = "; ".join(f"{r['model']}: {r.get('error') or 'sin contenido'}" for r in analyst_results)
+        raise RuntimeError(f"Ningún analista respondió ({errors})")
+
     analyses_text = "\n\n".join(
-        f"Análisis del Analista ({r['model']}):\n{r['raw']}" for r in analyst_results
+        f"Análisis del Analista ({r['model']}):\n{r.get('raw') or r.get('error') or '(vacío)'}"
+        for r in analyst_results
     )
     arbiter_user = (
         f"{analyses_text}\n\nAmbos analistas vieron los mismos datos de mercado. Evalúa ambas posturas y "
         f"entrega tu veredicto final. {_ARBITER_OUTPUT_SCHEMA}"
     )
     arbiter_result = _ai_run_model(AI_ARBITER_MODEL, _ARBITER_SYSTEM_PROMPT, arbiter_user)
+    if not arbiter_result.get("parsed") and not arbiter_result.get("raw"):
+        raise RuntimeError(
+            f"Árbitro {AI_ARBITER_MODEL} no respondió: {arbiter_result.get('error') or 'sin contenido'}"
+        )
 
     return {
         "generated_at": datetime.utcnow().isoformat() + "Z",
+        "provider": "openrouter",
+        "models": {"analysts": list(AI_ANALYST_MODELS), "arbiter": AI_ARBITER_MODEL},
         "context": ctx,
         "analysts": analyst_results,
         "arbiter": arbiter_result,
@@ -893,6 +939,23 @@ def _save_ai_committee_cache(data: dict) -> None:
     AI_COMMITTEE_CACHE_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
+def _load_ai_committee_meta() -> dict:
+    try:
+        if AI_COMMITTEE_META_PATH.exists():
+            return json.loads(AI_COMMITTEE_META_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"AI committee meta read failed: {e}")
+    return {}
+
+
+def _save_ai_committee_meta(**fields) -> None:
+    meta = _load_ai_committee_meta()
+    meta.update(fields)
+    meta["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    AI_COMMITTEE_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AI_COMMITTEE_META_PATH.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
 def _ai_committee_is_stale(cached: dict) -> bool:
     try:
         generated_at = datetime.fromisoformat(cached["generated_at"].replace("Z", ""))
@@ -911,11 +974,14 @@ def _regenerate_ai_committee_async() -> None:
     def _run():
         global _ai_committee_generating
         try:
+            _save_ai_committee_meta(last_attempt_at=datetime.utcnow().isoformat() + "Z")
             result = generate_ai_committee()
             _save_ai_committee_cache(result)
+            _save_ai_committee_meta(last_error=None, last_success_at=result["generated_at"])
             logger.info("AI committee: caché regenerada correctamente")
         except Exception as e:
             logger.error(f"AI committee: error regenerando: {e}")
+            _save_ai_committee_meta(last_error=str(e)[:800])
         finally:
             with _ai_committee_lock:
                 _ai_committee_generating = False
@@ -944,11 +1010,20 @@ def get_ai_committee():
     background; este endpoint solo lee el caché, nunca bloquea esperando a la IA.
     """
     cached = _load_ai_committee_cache()
+    meta = _load_ai_committee_meta()
+    extras = {
+        "stale": True if cached is None else _ai_committee_is_stale(cached),
+        "generating": _ai_committee_generating,
+        "last_error": meta.get("last_error"),
+        "last_attempt_at": meta.get("last_attempt_at"),
+        "configured_models": {"analysts": list(AI_ANALYST_MODELS), "arbiter": AI_ARBITER_MODEL},
+    }
+
     if cached is None:
         _regenerate_ai_committee_async()
-        return JSONResponse(content={"status": "generating", "generated_at": None})
+        return JSONResponse(content={"status": "generating", "generated_at": None, **extras})
 
-    if _ai_committee_is_stale(cached):
+    if extras["stale"]:
         _regenerate_ai_committee_async()
 
-    return JSONResponse(content={"status": "ready", **cached})
+    return JSONResponse(content={"status": "ready", **cached, **extras})
