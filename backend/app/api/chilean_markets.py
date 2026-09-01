@@ -15,6 +15,14 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from ..market.macro_data import MacroDataService
+from ..utils.afp_allocation_track import (
+    first_date_on_or_after,
+    hold_return_pct,
+    rebase_fund,
+    switching_path,
+    weights_from_dist,
+)
+from ..market.afp_committee_store import list_snapshots, upsert_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -977,6 +985,7 @@ def _regenerate_ai_committee_async() -> None:
             _save_ai_committee_meta(last_attempt_at=datetime.utcnow().isoformat() + "Z")
             result = generate_ai_committee()
             _save_ai_committee_cache(result)
+            upsert_snapshot(result, origin="live")
             _save_ai_committee_meta(last_error=None, last_success_at=result["generated_at"])
             logger.info("AI committee: caché regenerada correctamente")
         except Exception as e:
@@ -1026,4 +1035,145 @@ def get_ai_committee():
     if extras["stale"]:
         _regenerate_ai_committee_async()
 
+    upsert_snapshot(cached, origin=cached.get("provider") or "live")
     return JSONResponse(content={"status": "ready", **cached, **extras})
+
+
+def _cuota_panel(year_start: int, year_end: int):
+    by_fund: dict[str, dict[str, float]] = {}
+    for fund in FUND_TYPES:
+        raw, _ = _fetch_fund_data(fund, year_start, year_end)
+        by_fund[fund] = {
+            r["date_str"]: r["avg_value"]
+            for r in raw
+            if r.get("avg_value")
+        }
+    keysets = [set(series.keys()) for series in by_fund.values() if series]
+    if not keysets:
+        return [], by_fund
+    dates = sorted(set.intersection(*keysets))
+    return dates, by_fund
+
+
+def _arbiter_dist(snap: dict) -> list:
+    parsed = (snap.get("arbiter") or {}).get("parsed") or {}
+    decision = parsed.get("decision_final") or parsed
+    dist = decision.get("distribucion") if isinstance(decision, dict) else None
+    return dist if isinstance(dist, list) else []
+
+
+def _analyst_dist(row: dict) -> list:
+    parsed = (row or {}).get("parsed") or {}
+    dist = parsed.get("distribucion")
+    return dist if isinstance(dist, list) else []
+
+
+@router.get("/ai-committee-track")
+def get_ai_committee_track():
+    """Historial de veredictos y retorno hipotético con valor cuota AFP.
+
+    El path `committee` rebalancea a la distribución del árbitro en cada
+    veredicto. Cada snapshot también trae el hold desde esa fecha hasta hoy.
+    """
+    cached = _load_ai_committee_cache()
+    if cached and cached.get("generated_at"):
+        upsert_snapshot(cached, origin=cached.get("provider") or "live")
+
+    snapshots = list_snapshots()
+    today = datetime.today()
+    dates, cuotas = _cuota_panel(max(2002, today.year - 2), today.year)
+    if not dates:
+        return JSONResponse(content={
+            "snapshots": snapshots,
+            "series": [],
+            "summary": None,
+            "source": "Superintendencia de Pensiones de Chile",
+        })
+
+    end = dates[-1]
+    events = []
+    snap_out = []
+    for snap in snapshots:
+        as_of = snap["as_of_date"]
+        start = first_date_on_or_after(dates, as_of)
+        arb_dist = _arbiter_dist(snap)
+        weights = weights_from_dist(arb_dist)
+        if start and any(v > 0 for v in weights.values()):
+            events.append((as_of, weights))
+        hold = hold_return_pct(weights, cuotas, start, end) if start else None
+        benches = {}
+        if start:
+            for fund in FUND_TYPES:
+                one = {f: 0.0 for f in FUND_TYPES}
+                one[fund] = 1.0
+                benches[fund] = hold_return_pct(one, cuotas, start, end)
+        analysts_out = []
+        for row in snap.get("analysts") or []:
+            dist = _analyst_dist(row)
+            aw = weights_from_dist(dist)
+            analysts_out.append({
+                "model": row.get("model"),
+                "allocation": dist,
+                "hold_pct": hold_return_pct(aw, cuotas, start, end) if start else None,
+            })
+        vs = {}
+        for fund in ("A", "C", "E"):
+            bench = benches.get(fund)
+            vs[fund] = None if hold is None or bench is None else round(hold - bench, 2)
+        snap_out.append({
+            "as_of_date": as_of,
+            "generated_at": snap.get("generated_at"),
+            "provider": snap.get("provider"),
+            "origin": snap.get("origin"),
+            "arbiter": {
+                "model": (snap.get("arbiter") or {}).get("model"),
+                "allocation": arb_dist,
+                "hold_pct": hold,
+            },
+            "analysts": analysts_out,
+            "from": start,
+            "to": end if start else None,
+            "vs": vs,
+            "benches": benches,
+        })
+
+    path = switching_path(dates, cuotas, events)
+    if not path:
+        return JSONResponse(content={
+            "snapshots": snap_out,
+            "series": [],
+            "summary": None,
+            "source": "Superintendencia de Pensiones de Chile",
+        })
+
+    start = path[0]["date"]
+    path_dates = [p["date"] for p in path]
+    committee_map = {p["date"]: p["value"] for p in path}
+    rebased = {
+        fund: dict(zip(path_dates, rebase_fund(path_dates, cuotas, fund, start)))
+        for fund in FUND_TYPES
+    }
+    series = []
+    for day in path_dates:
+        row = {"date": day, "committee": committee_map[day]}
+        for fund in FUND_TYPES:
+            row[fund] = rebased[fund].get(day)
+        series.append(row)
+
+    last = series[-1]
+    summary = {
+        "committee_pct": round(last["committee"] - 100, 2),
+        "from": start,
+        "to": last["date"],
+    }
+    for fund in FUND_TYPES:
+        if last.get(fund) is not None:
+            summary[f"{fund}_pct"] = round(last[fund] - 100, 2)
+
+    return JSONResponse(content={
+        "snapshots": snap_out,
+        "series": series,
+        "summary": summary,
+        "source": "Superintendencia de Pensiones de Chile",
+    })
+

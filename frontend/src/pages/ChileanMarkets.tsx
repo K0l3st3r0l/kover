@@ -15,6 +15,7 @@ import {
 import { format, parseISO } from 'date-fns'
 import { es } from 'date-fns/locale'
 import TradingViewChart from '../components/TradingViewChart'
+import AfpCommitteeTrack from '../components/AfpCommitteeTrack'
 import api from '../services/api'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1362,6 +1363,8 @@ export default function ChileanMarkets() {
           )}
         </div>
       )}
+
+      <AfpCommitteeTrack currentAllocation={currentAllocation} />
 
       {/* ── Contexto Macroeconómico Chile ── */}
       {macroData?.indicators && (
