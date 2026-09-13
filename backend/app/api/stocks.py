@@ -9,7 +9,7 @@ from ..models.user import User
 from ..utils.auth import get_current_user
 from ..market import MarketDataService
 from ..utils import OptionsCalculator
-from ..services.premium_ledger import load_premium_by_ticker
+from ..services.premium_ledger import load_premium_by_ticker, adjusted_basis
 
 router = APIRouter()
 
@@ -20,7 +20,7 @@ def _apply_ledger_premium(response, stock, premiums: dict) -> None:
     premium_net = round(bucket.get("realized", 0.0) - bucket.get("commissions", 0.0), 2)
     response.total_premium_earned = premium_net
     if stock.shares > 0:
-        response.adjusted_cost_basis = round(stock.average_cost - (premium_net / stock.shares), 4)
+        response.adjusted_cost_basis = adjusted_basis(stock, bucket)
 
 # Schemas
 class StockCreate(BaseModel):

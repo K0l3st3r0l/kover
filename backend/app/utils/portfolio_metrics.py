@@ -261,6 +261,8 @@ def build_option_transaction_ledger(options: Iterable[Any], transactions: Iterab
             "realized_net": round(realized_net, 2),
             "open_net": round(open_net, 2),
             "commissions": commissions,
+            "gross_premium": round(sum(tx["amount"] for tx in matched if tx["side"] > 0), 2) if matched else None,
+            "closing_cost": round(sum(tx["amount"] for tx in matched if tx["side"] < 0), 2) if matched else None,
             "contracts": contracts,
             "row_contracts": opt_meta["contracts"],
             "sold_contracts": sold_contracts,

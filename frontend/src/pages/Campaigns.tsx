@@ -16,6 +16,8 @@ interface CampaignMetrics {
   total_realized_pnl: number | null
   total_realized_pnl_reason: string | null
   mark_to_market_pnl: number | null
+  mark_to_market_reason?: string | null
+  option_unrealized_pnl?: number | null
   return_pct: number | null
   annualized_return_pct: number | null
   premium_per_day: number | null
@@ -172,6 +174,7 @@ function PnlBreakdown({ m }: { m: CampaignMetrics }) {
     { label: 'P/L acciones (realizado)', value: m.stock_realized_pnl },
     { label: 'P/L acciones (no realizado)', value: m.stock_unrealized_pnl },
     { label: 'P/L opciones (realizado)', value: m.option_realized_pnl },
+    { label: 'P/L opciones (no realizado)', value: m.option_unrealized_pnl ?? null },
     { label: 'Prima abierta', value: m.option_open_premium, hint: 'todavía no realizada' },
     { label: 'Dividendos', value: m.dividends },
     { label: 'Comisiones', value: m.commissions == null ? null : -m.commissions },
@@ -196,9 +199,10 @@ function PnlBreakdown({ m }: { m: CampaignMetrics }) {
       {m.total_realized_pnl_reason && (
         <div className="text-xs text-amber-600 dark:text-amber-400">{m.total_realized_pnl_reason}</div>
       )}
+      {m.mark_to_market_reason && <p className="text-xs text-amber-600">{m.mark_to_market_reason}</p>}
       {m.mark_to_market_pnl != null && (
         <div className="flex items-baseline justify-between gap-4">
-          <span className="text-sm text-gray-600 dark:text-gray-400">Total a precio de mercado</span>
+          <span className="text-sm text-gray-600 dark:text-gray-400">Total estimado al ask (cotización diferida)</span>
           <span className={`font-mono tabular-nums ${pnlClass(m.mark_to_market_pnl)}`}>
             {money(m.mark_to_market_pnl)}
           </span>

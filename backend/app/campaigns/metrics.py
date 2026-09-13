@@ -34,7 +34,7 @@ def campaign_capital(campaign: Campaign) -> Optional[float]:
     return round(campaign.stock_cost_basis * shares, 2)
 
 
-def campaign_summary(campaign: Campaign, current_price: Optional[float] = None) -> dict[str, Any]:
+def campaign_summary(campaign: Campaign, current_price: Optional[float] = None, *, option_liability: Optional[float] = None, valuation_reason: Optional[str] = None) -> dict[str, Any]:
     """Resumen con stock, opciones y total siempre separados."""
     stock_pnl = campaign.stock_realized_pnl
     option_pnl = campaign.option_realized_pnl or 0.0
@@ -42,7 +42,7 @@ def campaign_summary(campaign: Campaign, current_price: Optional[float] = None) 
     dividends = campaign.dividends_total or 0.0
     commissions = campaign.commissions_total or 0.0
 
-    unrealized: Optional[float] = None
+    unrealized: Optional[float] = 0.0 if campaign.shares == 0 else None
     if current_price is not None and campaign.shares > 0 and campaign.stock_cost_basis is not None:
         unrealized = round((current_price - campaign.stock_cost_basis) * campaign.shares, 2)
 
@@ -53,8 +53,18 @@ def campaign_summary(campaign: Campaign, current_price: Optional[float] = None) 
         total_realized = round(stock_pnl + option_pnl + dividends - commissions, 2)
         total_reason = None
 
+    has_open = bool(option_open) or any(c.status == CycleStatus.OPEN for c in getattr(campaign, "cycles", []))
+    if not has_open:
+        option_liability = 0.0
+    option_unrealized = round(option_open - option_liability, 2) if option_liability is not None else None
+    mtm = None
+    if total_realized is not None and unrealized is not None and option_unrealized is not None and not valuation_reason:
+        mtm = round(total_realized + unrealized + option_unrealized, 2)
+    if mtm is None and valuation_reason is None:
+        valuation_reason = "Faltan cotizaciones o costo base para valorar la campaña completa."
+
     capital = campaign_capital(campaign)
-    days = campaign.days_deployed or _days_between(campaign.opened_at, campaign.closed_at)
+    days = _days_between(campaign.opened_at, campaign.closed_at) if campaign.closed_at is None else (campaign.days_deployed or _days_between(campaign.opened_at, campaign.closed_at))
 
     return_pct: Optional[float] = None
     annualized: Optional[float] = None
@@ -78,11 +88,10 @@ def campaign_summary(campaign: Campaign, current_price: Optional[float] = None) 
         "commissions": round(commissions, 2),
         "total_realized_pnl": total_realized,
         "total_realized_pnl_reason": total_reason,
-        "mark_to_market_pnl": (
-            round(total_realized + unrealized, 2)
-            if total_realized is not None and unrealized is not None
-            else None
-        ),
+        "mark_to_market_pnl": mtm,
+        "mark_to_market_reason": valuation_reason,
+        "option_unrealized_pnl": option_unrealized,
+        "option_closing_liability": option_liability,
         "return_pct": return_pct,
         "annualized_return_pct": annualized,
         "annualized_is_portfolio_return": False,
@@ -140,10 +149,10 @@ def cycle_summary(cycle: Any, current_ask: Optional[float] = None) -> dict[str, 
         "realized_captured_pct": realized_captured,
         # La señal se evalúa sobre el ask; sin ask no hay señal, no una señal falsa.
         "tp80_reached": bool(
-            current_ask is not None and cycle.tp80_price is not None and current_ask <= cycle.tp80_price
+            cycle.status == CycleStatus.OPEN and captured is not None and captured >= 80
         ),
         "tp75_reached": bool(
-            current_ask is not None and cycle.tp75_price is not None and current_ask <= cycle.tp75_price
+            cycle.status == CycleStatus.OPEN and captured is not None and captured >= 75
         ),
     }
 

@@ -24,6 +24,8 @@ interface Option {
   closed_at?: string;
   realized_pnl?: number;
   days_to_expiration?: number;
+  settlement_pending?: boolean;
+  editable_terms?: boolean;
   notes?: string;
   premium_yield?: number;
   annualized_return?: number;
@@ -149,14 +151,21 @@ function Options() {
   };
 
   const handleClose = async (id: number, closingPremium: number, contractsToClose?: number) => {
+    if (!Number.isFinite(closingPremium) || closingPremium < 0) { alert("Ingresa un precio de cierre válido."); return; }
+    const position = options.find(o => o.id === id);
+    const confirmExpired = closingPremium === 0 && position?.settlement_pending
+      ? window.confirm("¿El broker confirmó que estos contratos expiraron sin valor? Si hubo asignación, importa la liquidación del broker.") : false;
+    if (closingPremium === 0 && position?.settlement_pending && !confirmExpired) return;
     try {
       await api.post(`/api/options/${id}/close`, {
         closing_premium: closingPremium,
+        confirm_expired: confirmExpired,
         ...(contractsToClose !== undefined && { contracts_to_close: contractsToClose }),
       });
       fetchData();
-    } catch (error) {
-      console.error('Error closing option:', error);
+    } catch (error: any) {
+      const detail = error.response?.data?.detail;
+      alert(typeof detail === 'string' ? detail : 'No se pudo registrar el cierre.');
     }
   };
 
@@ -231,15 +240,16 @@ function Options() {
     setEditLoading(true);
     try {
       await api.put(`/api/options/${editTarget.id}`, {
+        ...(editTarget.editable_terms ? {
         strike_price: parseFloat(editForm.strike_price),
         contracts: parseInt(editForm.contracts),
         premium_per_contract: parseFloat(editForm.premium_per_contract),
-        expiration_date: new Date(editForm.expiration_date + 'T12:00:00').toISOString(),
+        expiration_date: editForm.expiration_date === editTarget.expiration_date.split('T')[0] ? editTarget.expiration_date : editForm.expiration_date + 'T00:00:00',
         strategy: editForm.strategy,
-        status: editForm.status,
-        notes: editForm.notes || null,
-        realized_pnl: editForm.realized_pnl !== '' ? parseFloat(editForm.realized_pnl) : null,
-        opened_at: editForm.opened_at ? new Date(editForm.opened_at + 'T12:00:00').toISOString() : null
+
+        opened_at: editForm.opened_at === editTarget.opened_at.split('T')[0] ? editTarget.opened_at : editForm.opened_at + 'T00:00:00',
+        } : {}),
+        notes: editForm.notes,
       });
       setEditTarget(null);
       fetchData();
@@ -355,7 +365,7 @@ function Options() {
                 {formError}
               </div>
             )}
-            
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -385,8 +395,8 @@ function Options() {
                   value={formData.strategy}
                   onChange={(e) => {
                     const strategy = e.target.value as 'COVERED_CALL' | 'CASH_SECURED_PUT';
-                    setFormData({ 
-                      ...formData, 
+                    setFormData({
+                      ...formData,
                       strategy,
                       option_type: strategy === 'COVERED_CALL' ? 'CALL' : 'PUT'
                     });
@@ -431,7 +441,7 @@ function Options() {
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Prima por Contrato *
+                  Prima por acción *
                 </label>
                 <input
                   type="number"
@@ -517,8 +527,8 @@ function Options() {
         <button
           onClick={() => setFilter('ALL')}
           className={`px-4 py-2 rounded-lg transition ${
-            filter === 'ALL' 
-              ? 'bg-blue-600 text-white' 
+            filter === 'ALL'
+              ? 'bg-blue-600 text-white'
               : 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600'
           }`}
         >
@@ -636,13 +646,13 @@ function Options() {
                           <div className="text-sm text-gray-900 dark:text-gray-100">{formatDate(option.expiration_date)}</div>
                           {option.status === 'OPEN' && option.days_to_expiration !== undefined && option.days_to_expiration >= 0 && (
                             <div className={`text-xs font-medium ${
-                              option.days_to_expiration <= 2 ? 'text-red-600' : 
-                              option.days_to_expiration <= 5 ? 'text-orange-600' : 
-                              option.days_to_expiration <= 7 ? 'text-yellow-600' : 
+                              option.days_to_expiration <= 2 ? 'text-red-600' :
+                              option.days_to_expiration <= 5 ? 'text-orange-600' :
+                              option.days_to_expiration <= 7 ? 'text-yellow-600' :
                               'text-gray-500'
                             }`}>
-                              {option.days_to_expiration === 0 ? '⚠️ HOY' : 
-                               option.days_to_expiration === 1 ? '⚠️ MAÑANA' : 
+                              {option.settlement_pending ? 'Confirma con el broker' : option.days_to_expiration === 0 ? '⚠️ HOY' :
+                               option.days_to_expiration === 1 ? '⚠️ MAÑANA' :
                                option.days_to_expiration <= 7 ? `⏰ ${option.days_to_expiration} días` :
                                `${option.days_to_expiration} días`}
                             </div>
@@ -655,7 +665,7 @@ function Options() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-center">
                       <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusBadge(option.status)}`}>
-                        {option.status}
+                        {option.settlement_pending ? "Liquidación pendiente" : option.status}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
@@ -679,7 +689,7 @@ function Options() {
                                   contractsToClose = parseInt(c, 10);
                                   if (isNaN(contractsToClose) || contractsToClose < 1) return;
                                 }
-                                const premium = prompt('Prima de cierre por contrato (0 si expiró sin valor):');
+                                const premium = prompt('Precio de recompra por acción (0 para cierre sin costo):');
                                 if (premium === null) return;
                                 handleClose(option.id, parseFloat(premium), contractsToClose);
                               }}
@@ -752,7 +762,7 @@ function Options() {
                   <h3 className="text-sm font-semibold text-red-800 dark:text-red-300 mb-3">① Buy to Close (pata de cierre)</h3>
                   <div>
                     <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
-                      Prima de recompra por contrato *
+                      Precio de recompra por acción *
                     </label>
                     <input
                       type="number" required step="0.01" min="0"
@@ -792,7 +802,7 @@ function Options() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Nueva Prima por Contrato *</label>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Nueva Prima por acción *</label>
                       <input
                         type="number" required step="0.01" min="0"
                         value={rollForm.new_premium_per_contract}
@@ -887,7 +897,8 @@ function Options() {
               )}
 
               <form onSubmit={handleEdit} className="space-y-4">
-                <div className="grid grid-cols-2 gap-4">
+                {!editTarget.editable_terms && <p className="text-sm text-amber-600">Este contrato tiene historial. Puedes editar sus notas; para cambiar la posición, registra un cierre o roll.</p>}
+                <fieldset disabled={!editTarget.editable_terms} className="grid grid-cols-2 gap-4 disabled:opacity-60">
                   <div>
                     <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Strike Price *</label>
                     <input type="number" required step="0.01" min="0"
@@ -905,7 +916,7 @@ function Options() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Prima por Contrato *</label>
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Prima por acción *</label>
                     <input type="number" required step="0.01" min="0"
                       value={editForm.premium_per_contract}
                       onChange={e => setEditForm({...editForm, premium_per_contract: e.target.value})}
@@ -941,7 +952,7 @@ function Options() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Estado *</label>
-                    <select
+                    <select disabled
                       value={editForm.status}
                       onChange={e => setEditForm({...editForm, status: e.target.value as any})}
                       className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-blue-400 focus:border-transparent"
@@ -952,12 +963,12 @@ function Options() {
                       <option value="ASSIGNED">ASSIGNED</option>
                     </select>
                   </div>
-                </div>
+                </fieldset>
 
                 {editForm.status !== 'OPEN' && (
                   <div>
                     <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">P&L Realizado</label>
-                    <input type="number" step="0.01"
+                    <input disabled type="number" step="0.01"
                       value={editForm.realized_pnl}
                       onChange={e => setEditForm({...editForm, realized_pnl: e.target.value})}
                       placeholder="Dejar vacío para calcular automáticamente"

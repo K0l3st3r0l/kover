@@ -1657,12 +1657,15 @@ async def confirm_import(
             db.add(new_opt)
 
         elif t.tipo in ("BUY_CALL", "BUY_PUT"):
+            # Flush prior closes so another execution cannot reuse a settled row.
+            db.flush()
             # Buscar la opción abierta correspondiente para cerrarla (total o parcialmente)
             opt_type_enum = OptionType.CALL if t.opt_type == "C" else OptionType.PUT
             open_opt = db.query(Option).filter(
                 Option.stock_id == stk.id,
                 Option.ticker == t.ticker,
                 Option.strike_price == t.strike_price,
+                Option.expiration_date == dt_exp,
                 Option.option_type == opt_type_enum,
                 Option.status == OptionStatus.OPEN,
             ).first()
@@ -1680,7 +1683,7 @@ async def confirm_import(
                     open_opt.status = OptionStatus.ASSIGNED if t.es_asignacion else OptionStatus.CLOSED
                     open_opt.closed_at = dt_close
                     open_opt.closing_premium = round(per_share_premium, 4)
-                    open_opt.realized_pnl = round(open_opt.total_premium - closing_cost, 2)
+                    open_opt.realized_pnl = round((open_opt.realized_pnl or 0) + open_opt.total_premium - closing_cost, 2)
                 else:
                     # Cierre parcial: reducir contratos y prima proporcionalmente
                     ratio_closed = contracts_closing / open_opt.contracts
@@ -1724,7 +1727,7 @@ async def confirm_import(
             open_opt.status = OptionStatus.EXPIRED
             open_opt.closed_at = dt_exp
             open_opt.closing_premium = 0.0
-            open_opt.realized_pnl = open_opt.total_premium
+            open_opt.realized_pnl = round((open_opt.realized_pnl or 0) + open_opt.total_premium, 2)
 
     # ── Fase 3.6: cerrar opciones asignadas ───────────────────────────
     for t in to_import:
@@ -1759,7 +1762,7 @@ async def confirm_import(
             open_opt.status = OptionStatus.ASSIGNED
             open_opt.closed_at = dt_assign
             # Full premium earned on assignment (no closing cost)
-            open_opt.realized_pnl = open_opt.total_premium
+            open_opt.realized_pnl = round((open_opt.realized_pnl or 0) + open_opt.total_premium, 2)
 
     try:
         db.commit()

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..campaigns.builder import rebuild_campaigns
 from ..campaigns.metrics import campaign_summary, cycle_summary, portfolio_rollup
+from ..campaigns.valuation import option_marks
+from ..models import CycleStatus
 from ..database import get_db
 from ..logging_config import get_logger
 from ..market.market_data import MarketDataService
@@ -34,7 +36,13 @@ def _prices_for(campaigns: list[Campaign]) -> dict[str, Optional[float]]:
         return {}
 
 
-def _serialize(campaign: Campaign, price: Optional[float], with_cycles: bool) -> dict[str, Any]:
+def _serialize(campaign: Campaign, price: Optional[float], with_cycles: bool, marks=None) -> dict[str, Any]:
+    marks = marks or {}
+    open_cycles = [c for c in campaign.cycles if c.status == CycleStatus.OPEN]
+    reason = next((marks.get(c.id, {}).get("error", "Falta cotización de recompra.") for c in open_cycles
+                   if marks.get(c.id, {}).get("liability") is None), None)
+    reason = reason or marks.get(("campaign", campaign.id))
+    liability = sum(marks[c.id]["liability"] for c in open_cycles) if not reason else None
     payload: dict[str, Any] = {
         "id": campaign.id,
         "ticker": campaign.ticker,
@@ -48,10 +56,11 @@ def _serialize(campaign: Campaign, price: Optional[float], with_cycles: bool) ->
         "closed_at": campaign.closed_at.isoformat() if campaign.closed_at else None,
         "current_price": price,
         "cycles_count": len(campaign.cycles),
-        "metrics": campaign_summary(campaign, price),
+        "metrics": campaign_summary(campaign, price, option_liability=liability, valuation_reason=reason),
+        "option_quote_as_of": min((marks[c.id]["as_of"] for c in open_cycles if marks.get(c.id, {}).get("as_of")), default=None),
     }
     if with_cycles:
-        payload["cycles"] = [cycle_summary(c) for c in campaign.cycles]
+        payload["cycles"] = [cycle_summary(c, marks.get(c.id, {}).get("ask")) for c in campaign.cycles]
     return payload
 
 
@@ -80,9 +89,10 @@ async def list_campaigns(
 
     campaigns = query.order_by(Campaign.opened_at.desc()).all()
     prices = _prices_for(campaigns)
+    marks = option_marks(db, campaigns)
 
     return {
-        "campaigns": [_serialize(c, prices.get(c.ticker), False) for c in campaigns],
+        "campaigns": [_serialize(c, prices.get(c.ticker), False, marks) for c in campaigns],
         "summary": portfolio_rollup(campaigns),
         "price_source": "yfinance" if prices else None,
     }
@@ -113,7 +123,7 @@ async def get_campaign(
                 extra={"ticker": campaign.ticker, "error": str(exc)[:300]},
             )
 
-    return _serialize(campaign, price, True)
+    return _serialize(campaign, price, True, option_marks(db, [campaign]))
 
 
 @router.post("/rebuild")

@@ -183,6 +183,11 @@ def _cycle_plan_from_option(
         source = (ledger_row or {}).get("premium_source", "OPTION_ROW_FALLBACK")
 
     gross_premium = float(option.total_premium or 0.0)
+    if ledger_row and ledger_row.get("gross_premium") is not None:
+        gross_premium = float(ledger_row["gross_premium"])
+        closing_cost = float(ledger_row["closing_cost"] or 0)
+    elif contracts and getattr(option, "premium_per_contract", None) is not None:
+        gross_premium = float(option.premium_per_contract) * shares_covered
     entry_premium = (gross_premium / shares_covered) if shares_covered else 0.0
     exit_premium = float(option.closing_premium) if option.closing_premium is not None else None
 

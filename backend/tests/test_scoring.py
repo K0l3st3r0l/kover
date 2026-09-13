@@ -26,6 +26,8 @@ HOY = date(2026, 8, 13)
 
 
 def metrics(**overrides):
+    if "bid" in overrides and "ask" not in overrides:
+        overrides["ask"] = overrides["bid"] + 0.02
     quote = make_quote(**{k: v for k, v in overrides.items() if k not in ("stock_ask", "price")})
     return compute_covered_call(
         quote,

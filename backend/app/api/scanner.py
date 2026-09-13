@@ -7,7 +7,7 @@ que el scanner las evalúe después, y por qué las demás no?".
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -25,6 +25,9 @@ from ..scanner.holdings import evaluate_for_holding, rank_for_cycle, resolve_cos
 from ..scanner.cc_scan import PICK_PROFILE_PREFIX
 from ..scanner.scoring import PROFILES, evaluate_gate
 from ..utils.auth import get_current_user
+from ..services.premium_ledger import load_premium_by_ticker, adjusted_basis
+from ..services.option_positions import available_call_contracts
+from ..utils.calculators import SANTIAGO_TZ
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -264,7 +267,7 @@ async def list_covered_call_candidates(
     min_liquidity: Optional[float] = Query(None, ge=0, le=100),
     max_dte: Optional[int] = Query(None, ge=1),
     order_by: str = Query("final_score", description="final_score | cc_opportunity_score | annualized_premium_yield | annualized_return_if_assigned | liquidity_score"),
-    limit: int = Query(100, le=500),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
@@ -301,7 +304,12 @@ async def list_covered_call_candidates(
     q = (
         db.query(CoveredCallCandidate, Instrument)
         .join(Instrument, Instrument.id == CoveredCallCandidate.instrument_id)
-        .filter(CoveredCallCandidate.pick_type == pick)
+        .filter(
+            CoveredCallCandidate.pick_type == pick,
+            CoveredCallCandidate.expiration > datetime.now(SANTIAGO_TZ).date(),
+            CoveredCallCandidate.scanned_at >= datetime.now(timezone.utc) - timedelta(hours=24),
+            CoveredCallCandidate.quote_as_of >= datetime.now(timezone.utc) - timedelta(hours=24),
+        )
     )
     if min_financial_safety is not None:
         q = q.filter(CoveredCallCandidate.financial_safety_score >= min_financial_safety)
@@ -311,10 +319,12 @@ async def list_covered_call_candidates(
         q = q.filter(CoveredCallCandidate.spread_pct <= max_spread_pct)
     if min_liquidity is not None:
         q = q.filter(CoveredCallCandidate.liquidity_score >= min_liquidity)
-    if max_dte is not None:
-        q = q.filter(CoveredCallCandidate.dte <= max_dte)
 
-    filas = q.order_by(columnas_validas[order_by].desc().nullslast()).limit(limit).all()
+    # Annualized values depend on today's DTE, not the scan's saved duration.
+    filas = q.order_by(columnas_validas[order_by].desc().nullslast()).all()
+    if order_by in {"annualized_premium_yield", "annualized_return_if_assigned"}:
+        attr = "premium_yield" if order_by == "annualized_premium_yield" else "return_if_assigned"
+        filas.sort(key=lambda row: float(getattr(row[0], attr) or 0) / (row[0].expiration - datetime.now(SANTIAGO_TZ).date()).days, reverse=True)
 
     def _f(value):
         return float(value) if value is not None else None
@@ -325,6 +335,9 @@ async def list_covered_call_candidates(
     # el ranking crudo de K4.
     evaluados = []
     for c, inst in filas:
+        current_dte = (c.expiration - datetime.now(SANTIAGO_TZ).date()).days
+        if max_dte is not None and current_dte > max_dte:
+            continue
         pasa, razones = (True, [])
         if perfil is not None:
             pasa, razones = evaluate_gate(
@@ -333,12 +346,13 @@ async def list_covered_call_candidates(
                 _f(c.market_safety_score),
                 _f(c.spread_pct),
                 _f(c.delta),
-                c.dte,
+                current_dte,
             )
         if perfil is not None and not pasa and not include_rejected:
             continue
         evaluados.append((c, inst, pasa, razones))
 
+    evaluados = evaluados[:limit]
     return {
         "pick_type": pick,
         "profile": perfil.name if perfil else None,
@@ -356,7 +370,7 @@ async def list_covered_call_candidates(
                 "occ_symbol": c.occ_symbol,
                 "expiration": c.expiration.isoformat(),
                 "strike": _f(c.strike),
-                "dte": c.dte,
+                "dte": (c.expiration - datetime.now(SANTIAGO_TZ).date()).days,
                 "underlying_price": _f(c.underlying_price),
                 "stock_ask": _f(c.stock_ask),
                 "call_bid": _f(c.call_bid),
@@ -368,9 +382,9 @@ async def list_covered_call_candidates(
                 "open_interest": c.open_interest,
                 "premium_total": _f(c.premium_total),
                 "premium_yield": _f(c.premium_yield),
-                "annualized_premium_yield": _f(c.annualized_premium_yield),
+                "annualized_premium_yield": float(c.premium_yield) * 365 / (c.expiration - datetime.now(SANTIAGO_TZ).date()).days,
                 "return_if_assigned": _f(c.return_if_assigned),
-                "annualized_return_if_assigned": _f(c.annualized_return_if_assigned),
+                "annualized_return_if_assigned": float(c.return_if_assigned) * 365 / (c.expiration - datetime.now(SANTIAGO_TZ).date()).days,
                 "downside_protection": _f(c.downside_protection),
                 "breakeven": _f(c.breakeven),
                 "moneyness": _f(c.moneyness),
@@ -408,6 +422,8 @@ async def covered_calls_for_holdings(
         .all()
     )
 
+    if min_dte > max_dte:
+        raise HTTPException(422, "El DTE mínimo no puede superar el máximo.")
     provider = CboeChainsProvider()
     filtro = ChainFilter(
         min_dte=min_dte, max_dte=max_dte,
@@ -418,13 +434,21 @@ async def covered_calls_for_holdings(
 
     resultado = []
     errores = []
+    premiums = load_premium_by_ticker(db, current_user.id)
     for stock in posiciones:
-        cost_basis, fuente = resolve_cost_basis(stock)
+        bucket = premiums.get(stock.ticker, {})
+        cost_basis, fuente = adjusted_basis(stock, bucket), "ADJUSTED"
+        available = available_call_contracts(db, stock)
+        if available < 1:
+            continue
         if cost_basis is None:
             errores.append({"ticker": stock.ticker, "error": "sin costo base registrado"})
             continue
         try:
             quotes, underlying = provider.get_chain(stock.ticker)
+            as_of = underlying.as_of.replace(tzinfo=timezone.utc) if underlying.as_of.tzinfo is None else underlying.as_of
+            if as_of < datetime.now(timezone.utc) - timedelta(hours=24):
+                raise ProviderError("cboe", "Cotización de más de 24 horas; consulta el broker.")
         except ProviderError as exc:
             errores.append({"ticker": stock.ticker, "error": str(exc)[:200]})
             continue
@@ -433,26 +457,27 @@ async def covered_calls_for_holdings(
             continue
 
         candidatos, _ = evaluate_chain(
-            quotes, underlying.price, date.today(), stock_ask=underlying.ask, filtro=filtro
+            quotes, underlying.price, datetime.now(SANTIAGO_TZ).date(), stock_ask=underlying.ask, filtro=filtro
         )
         evaluados = [
             h for h in (
-                evaluate_for_holding(m, cost_basis, fuente, float(stock.shares)) for m in candidatos
+                evaluate_for_holding(m, cost_basis, fuente, float(stock.shares), available_contracts=available) for m in candidatos
             )
-            if h is not None and (include_loss_making or not h.realizes_loss)
+            if h is not None and (include_loss_making or not h.net_loss_if_assigned)
         ]
 
         resultado.append({
             "ticker": stock.ticker,
             "shares": float(stock.shares),
-            "contracts": int(stock.shares // 100),
+            "contracts": available,
+            "reserved_contracts": int(stock.shares // 100) - available,
             "uncovered_shares": float(stock.shares) - int(stock.shares // 100) * 100,
             "cost_basis": round(cost_basis, 4),
             "cost_basis_source": fuente,
             "gross_cost": float(stock.average_cost) if stock.average_cost else None,
-            "premium_collected": float(stock.total_premium_earned or 0),
+            "premium_collected": round(bucket.get("realized", 0) - bucket.get("commissions", 0), 2),
             "market_price": underlying.price,
-            "vs_cost_basis": round((underlying.price - cost_basis) / cost_basis, 6),
+            "vs_cost_basis": round((underlying.price - cost_basis) / cost_basis, 6) if cost_basis > 0 else None,
             "quote_as_of": underlying.as_of.isoformat(),
             "candidates": [h.as_dict() for h in rank_for_cycle(evaluados)],
         })

@@ -94,9 +94,12 @@ def evaluate_for_holding(
     cost_basis: float,
     cost_basis_source: str,
     shares: float,
+    available_contracts: Optional[int] = None,
 ) -> Optional[HoldingCoveredCall]:
     """Reescribe las métricas del contrato en términos de la posición real."""
     contracts = int(shares // CONTRACT_MULTIPLIER)
+    if available_contracts is not None:
+        contracts = min(contracts, max(0, available_contracts))
     if contracts < 1:
         return None  # menos de 100 acciones: no hay covered call que vender
 

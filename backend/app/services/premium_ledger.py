@@ -55,3 +55,8 @@ def load_premium_by_ticker(
 ) -> dict[str, dict[str, float]]:
     _, ledger = load_option_ledger(db, user_id, transactions)
     return premium_by_ticker(ledger)
+
+
+def adjusted_basis(stock, bucket: dict) -> float:
+    net = round(bucket.get("realized", 0.0) - bucket.get("commissions", 0.0), 2)
+    return round(stock.average_cost - net / stock.shares, 4) if stock.shares > 0 else stock.average_cost

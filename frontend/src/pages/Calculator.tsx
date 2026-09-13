@@ -1,152 +1,7 @@
 import { useState, useEffect } from 'react'
 import api from '../services/api'
 
-// --- Broker Data types ---
-interface BrokerOptionRow {
-  id: number
-  side: 'sell' | 'buy'
-  type: 'call' | 'put'
-  strike: string
-  expiration: string     // yyyy-mm-dd
-  premium: string        // per share (bid/ask mid)
-  contracts: string
-}
-
-interface BrokerOptionCalc {
-  id: number
-  side: 'sell' | 'buy'
-  type: 'call' | 'put'
-  strike: number
-  expiration: string
-  premium: number
-  contracts: number
-  dte: number
-  totalCashFlow: number  // positive = recibís, negative = pagás
-  otmPct: number         // positive = OTM, negative = ITM
-  breakeven: number           // precio donde empezás a perder upside (call) o downside (put)
-  breakevenMovePct: number    // % vs precio actual
-  downsideProtection?: number // solo covered call: costBasis - premium (cuánto puede caer la acción)
-  downsideProtectionPct?: number
-  maxProfit: number      // por todos los contratos (Infinity para buy call)
-  maxLoss: number        // por todos los contratos
-  roiPct: number
-  annualizedRoiPct: number
-  score: number
-  strategyName: string
-}
-
-function calcBrokerOption(
-  row: BrokerOptionRow,
-  stockPrice: number,
-  costBasis: number,
-  commissionPerContract = 0
-): BrokerOptionCalc | null {
-  const strike = parseFloat(row.strike)
-  const premium = parseFloat(row.premium)
-  const contracts = parseInt(row.contracts) || 1
-  if (!row.expiration || isNaN(strike) || isNaN(premium) || strike <= 0 || premium <= 0 || stockPrice <= 0) return null
-
-  const totalCommission = commissionPerContract * contracts
-
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const exp = new Date(row.expiration + 'T00:00:00')
-  const dte = Math.max(0, Math.round((exp.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)))
-
-  // % OTM desde el precio actual (positivo = fuera del dinero en la dirección favorable)
-  const otmPct =
-    row.type === 'call'
-      ? ((strike - stockPrice) / stockPrice) * 100   // call OTM si strike > precio
-      : ((stockPrice - strike) / stockPrice) * 100    // put OTM si strike < precio
-
-  let breakeven: number
-  let maxProfit: number
-  let maxLoss: number
-  let roiPct: number
-  let strategyName: string
-  let totalCashFlow: number
-
-  let downsideProtection: number | undefined
-  let downsideProtectionPct: number | undefined
-
-  if (row.side === 'sell') {
-    // ── VENDER opción ──────────────────────────────────────────
-    totalCashFlow = premium * 100 * contracts - totalCommission  // neto tras comisión
-
-    if (row.type === 'call') {
-      strategyName = 'Covered Call'
-      breakeven = strike + premium
-      maxProfit = premium * 100 * contracts - totalCommission
-      const basis = costBasis > 0 ? costBasis : stockPrice
-      maxLoss = Math.max(0, (basis - premium) * 100 * contracts + totalCommission)
-      const capitalAtRisk = basis * 100
-      roiPct = (maxProfit / capitalAtRisk) * 100
-      downsideProtection = basis - premium
-      downsideProtectionPct = ((stockPrice - downsideProtection) / stockPrice) * 100
-    } else {
-      strategyName = 'Cash-Secured Put'
-      breakeven = strike - premium
-      maxProfit = premium * 100 * contracts - totalCommission
-      maxLoss = Math.max(0, (strike - premium) * 100 * contracts + totalCommission)
-      const capitalAtRisk = strike * 100
-      roiPct = (maxProfit / capitalAtRisk) * 100
-    }
-  } else {
-    // ── COMPRAR opción ─────────────────────────────────────────
-    totalCashFlow = -(premium * 100 * contracts) - totalCommission  // costo total
-
-    if (row.type === 'call') {
-      strategyName = 'Buy Call'
-      breakeven = strike + premium
-      maxProfit = Infinity
-      maxLoss = premium * 100 * contracts + totalCommission
-      roiPct = ((stockPrice - breakeven) / breakeven) * 100
-    } else {
-      strategyName = 'Buy Put'
-      breakeven = strike - premium
-      maxProfit = Math.max(0, (strike - premium) * 100 * contracts - totalCommission)
-      maxLoss = premium * 100 * contracts + totalCommission
-      roiPct = ((breakeven - stockPrice) / stockPrice) * 100
-    }
-  }
-
-  const annualizedRoiPct = row.side === 'sell' && dte > 0 ? (roiPct / dte) * 365 : roiPct
-  const breakevenMovePct = ((breakeven - stockPrice) / stockPrice) * 100
-
-  // Score: para ventas = ROI anualizado ponderado por seguridad OTM
-  //        para compras = potencial de retorno (negativo si estás perdiendo ya)
-  let score: number
-  if (row.side === 'sell') {
-    const safetyBonus = otmPct > 5 ? 1.1 : otmPct > 0 ? 1.0 : 0.85
-    score = annualizedRoiPct * safetyBonus
-  } else {
-    score = roiPct  // para compras: ROI potencial
-  }
-
-  return {
-    id: row.id,
-    side: row.side,
-    type: row.type,
-    strike,
-    expiration: row.expiration,
-    premium,
-    contracts,
-    dte,
-    totalCashFlow,
-    otmPct,
-    breakeven,
-    breakevenMovePct,
-    downsideProtection,
-    downsideProtectionPct,
-    maxProfit,
-    maxLoss,
-    roiPct,
-    annualizedRoiPct,
-    score,
-    strategyName,
-  }
-}
-// --- end Broker Data ---
+import { calcBrokerOption, rollCost, rolledCostBasis, type BrokerOptionRow, type BrokerOptionCalc } from '../utils/optionsMath'
 
 interface PortfolioStock {
   id: number
@@ -199,11 +54,12 @@ function Calculator() {
     }
     const s = portfolioStocks.find(s => s.id === id)
     if (s) {
+      setBrokerStockPrice('')
       setBrokerTicker(s.ticker)
       setBrokerCostBasis(s.adjusted_cost_basis.toFixed(2))
       // Cargar opciones abiertas de esta acción (filtramos por stock_id en el frontend)
       api.get(`/api/options/?status=OPEN`)
-        .then(res => setActiveOptions((res.data || []).filter((o: any) => o.stock_id === id)))
+        .then(res => setActiveOptions((res.data || []).filter((o: any) => o.stock_id === id && !o.settlement_pending)))
         .catch(() => {})
     }
   }
@@ -213,7 +69,7 @@ function Calculator() {
     const expDate = opt.expiration_date.split('T')[0]
     setBrokerOptionRows(prev => {
       const updated = prev.map((r, i) => i === 0
-        ? { ...r, side: 'sell' as const, type: opt.option_type.toLowerCase() as 'call'|'put',
+        ? { ...r, side: 'buy' as const, type: opt.option_type.toLowerCase() as 'call'|'put',
             strike: opt.strike_price.toString(), expiration: expDate,
             premium: '',  // usuario debe ingresar precio actual de cierre (BTC)
             contracts: opt.contracts.toString(),
@@ -238,20 +94,35 @@ function Calculator() {
   const [rollDone, setRollDone] = useState<string | null>(null)
 
   const executeRoll = async () => {
-    if (!rollConfirm || !rollOption) return
+    if (!rollConfirm || !rollOption || rollConfirm.side !== 'sell' || rollConfirm.type !== rollOption.option_type.toLowerCase()) return
     setRollExecuting(true)
     try {
-      await api.put(`/api/options/${rollOption.id}`, {
-        strike_price: rollConfirm.strike,
-        premium_per_contract: rollConfirm.premium,
-        contracts: rollConfirm.contracts,
-        expiration_date: rollConfirm.expiration + 'T00:00:00',
-        opened_at: new Date().toISOString(),
+      const closingPremium = brokerOptionRows[0]?.premium ?? ''
+      if (rollClosingCost === null) throw new Error('Ingresa el precio de recompra actual.')
+      await api.post(`/api/options/${rollOption.id}/roll`, {
+        closing_premium: Number(closingPremium),
+        closing_commission: Number(brokerCommission) * rollOption.contracts,
+        opening_commission: Number(brokerCommission) * rollConfirm.contracts,
+        new_strike_price: rollConfirm.strike,
+        new_premium_per_contract: rollConfirm.premium,
+        new_contracts: rollConfirm.contracts,
+        new_expiration_date: rollConfirm.expiration + 'T00:00:00',
       })
       const expFmt = new Date(rollConfirm.expiration + 'T00:00:00')
         .toLocaleDateString('es-CL', { day: '2-digit', month: 'short', year: '2-digit' })
-      setRollDone(`Roll ejecutado: ${rollOption.option_type} $${rollConfirm.strike.toFixed(2)} vto. ${expFmt} @ $${rollConfirm.premium.toFixed(2)}/acc`)
+      setRollDone(`Roll registrado: ${rollOption.option_type} $${rollConfirm.strike.toFixed(2)} vto. ${expFmt} @ $${rollConfirm.premium.toFixed(2)}/acc`)
       setRollConfirm(null)
+      setBrokerOptionRows([{ id: 1, side: 'sell', type: 'call', strike: '', expiration: '', premium: '', contracts: '1' }])
+      setNextId(2)
+      setBrokerCostBasis('')
+      api.get('/api/stocks/')
+        .then(res => {
+          const stocks = res.data.filter((s: PortfolioStock & {is_active: boolean}) => s.is_active)
+          setPortfolioStocks(stocks)
+          const stock = stocks.find((s: PortfolioStock) => s.id === selectedStockId)
+          if (stock) setBrokerCostBasis(stock.adjusted_cost_basis.toFixed(2))
+        })
+        .catch(() => {})
       // Refrescar opciones activas
       if (selectedStockId !== '') {
         api.get('/api/options/?status=OPEN')
@@ -262,7 +133,7 @@ function Calculator() {
           .catch(() => {})
       }
     } catch (e: any) {
-      alert(e.response?.data?.detail || 'Error al ejecutar el roll')
+      alert(e.response?.data?.detail || e.message || 'Error al registrar el roll')
     } finally {
       setRollExecuting(false)
     }
@@ -290,14 +161,19 @@ function Calculator() {
     )
   }
 
-  const brokerCalcResults: (BrokerOptionCalc | null)[] = brokerOptionRows.map(row =>
-    calcBrokerOption(row, parseFloat(brokerStockPrice) || 0, parseFloat(brokerCostBasis) || 0, parseFloat(brokerCommission) || 0)
-  )
-
-  const validResults = brokerCalcResults.filter((r): r is BrokerOptionCalc => r !== null)
-  // Excluir la fila base del roll del cálculo de mejor opción
   const rollBaseId = rollOption ? brokerOptionRows[0]?.id : null
-  const candidatesForBest = rollBaseId != null ? validResults.filter(r => r.id !== rollBaseId) : validResults
+  const rollClosingCost = rollOption ? rollCost(brokerOptionRows[0]?.premium ?? '', rollOption.contracts, Number(brokerCommission)) : null
+  const inputBasis = Number(brokerCostBasis) || Number(brokerStockPrice)
+  const rollShares = portfolioStocks.find(s => s.id === selectedStockId)?.shares ?? 0
+  const nextBasis = rollOption && rollClosingCost !== null
+    ? rolledCostBasis(inputBasis, rollOption.premium_per_contract, rollOption.contracts, rollClosingCost, rollShares)
+    : inputBasis
+  const brokerCalcResults: (BrokerOptionCalc | null)[] = brokerOptionRows.map(row =>
+    calcBrokerOption(row, Number(brokerStockPrice), rollOption && row.id !== rollBaseId ? nextBasis : inputBasis, Number(brokerCommission))
+  )
+  const validResults = brokerCalcResults.filter((r): r is BrokerOptionCalc => r !== null)
+  const candidatesForBest = validResults.filter(r => r.side === 'sell' && r.dte > 0 && r.id !== rollBaseId && (!rollOption || (r.type === rollOption.option_type.toLowerCase() && rollClosingCost !== null)))
+    .map(r => rollOption && rollClosingCost !== null ? { ...r, score: ((r.totalCashFlow - rollClosingCost) / ((r.type === 'call' ? (Number(brokerCostBasis) || Number(brokerStockPrice)) : r.strike) * 100 * r.contracts)) * 100 * 365 / r.dte } : r)
   const bestId = candidatesForBest.length > 0 ? candidatesForBest.reduce((a, b) => (a.score > b.score ? a : b)).id : null
   // --- end Broker Data state ---
 
@@ -308,13 +184,13 @@ function Calculator() {
           {rollConfirm && rollOption && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
               <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl p-6 max-w-md w-full mx-4">
-                <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-1">Confirmar Roll</h3>
+                <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100 mb-1">Registrar Roll</h3>
                 <p className="text-sm text-gray-500 dark:text-gray-400 mb-5">
-                  Esto actualiza la opción activa con los nuevos valores seleccionados.
+                  Esto registra la recompra y abre un contrato nuevo. La orden se realiza en tu broker.
                 </p>
                 <div className="space-y-3 mb-5">
                   <div className="rounded-lg bg-gray-100 dark:bg-gray-700 p-3">
-                    <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-2">Opción actual (se reemplaza)</p>
+                    <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-2">Opción actual (se cierra)</p>
                     <div className="grid grid-cols-3 gap-2 text-sm text-gray-700 dark:text-gray-200">
                       <div><span className="block text-xs text-gray-400">Strike</span><strong>${rollOption.strike_price.toFixed(2)}</strong></div>
                       <div><span className="block text-xs text-gray-400">Vencimiento</span><strong>{new Date(rollOption.expiration_date.split('T')[0] + 'T00:00:00').toLocaleDateString('es-CL', {day:'2-digit',month:'short',year:'2-digit'})}</strong></div>
@@ -341,14 +217,13 @@ function Calculator() {
                   {(() => {
                     const baseRow = validResults.find(vr => vr.id === rollBaseId)
                     const commission = parseFloat(brokerCommission) || 0
-                    const btcCost = baseRow
-                      ? baseRow.premium * 100 * baseRow.contracts + commission * baseRow.contracts
-                      : rollOption.premium_per_contract * rollOption.contracts * 100 + commission * rollOption.contracts
+                    const btcCost = rollClosingCost
+                    if (btcCost === null) return <span className="text-amber-600">Ingresa el precio de recompra actual</span>
                     const netCredit = rollConfirm.totalCashFlow - btcCost
                     return (
                       <div className={`rounded-lg p-3 text-sm font-semibold ${netCredit >= 0 ? 'bg-green-100 dark:bg-green-900/40 text-green-800 dark:text-green-300' : 'bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300'}`}>
                         {netCredit >= 0 ? `✅ Roll por crédito neto: +$${netCredit.toFixed(2)}` : `⚠️ Roll por débito neto: -$${Math.abs(netCredit).toFixed(2)}`}
-                        <span className="block text-xs font-normal mt-0.5 opacity-80">DTE nuevos: {rollConfirm.dte} días · ROI anualizado: {rollConfirm.annualizedRoiPct.toFixed(1)}%</span>
+                        <span className="block text-xs font-normal mt-0.5 opacity-80">DTE nuevos: {rollConfirm.dte} días · Retorno neto del roll: {candidatesForBest.find(c => c.id === rollConfirm.id)?.score.toFixed(1) ?? "—"}% anual</span>
                         {baseRow && <span className="block text-xs font-normal opacity-70">BTC: ${(baseRow.premium * 100 * baseRow.contracts + commission * baseRow.contracts).toFixed(2)} · STO: ${rollConfirm.totalCashFlow.toFixed(2)}</span>}
                       </div>
                     )
@@ -358,8 +233,8 @@ function Calculator() {
                   <button onClick={() => setRollConfirm(null)} className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700">
                     Cancelar
                   </button>
-                  <button onClick={executeRoll} disabled={rollExecuting} className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-semibold rounded-lg">
-                    {rollExecuting ? 'Ejecutando...' : 'Confirmar Roll'}
+                  <button onClick={executeRoll} disabled={rollExecuting || rollClosingCost === null} className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-semibold rounded-lg">
+                    {rollExecuting ? 'Ejecutando...' : 'Registrar Roll'}
                   </button>
                 </div>
               </div>
@@ -387,7 +262,7 @@ function Calculator() {
 
           {/* Stock info */}
           <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100 mb-4">1. Seleccioná la acción</h3>
+            <h3 className="text-base font-semibold text-gray-800 dark:text-gray-100 mb-4">1. Selecciona la acción</h3>
 
             {/* Portfolio selector */}
             <div className="mb-4">
@@ -568,7 +443,7 @@ function Calculator() {
                     <label className="md:hidden text-xs text-gray-500 dark:text-gray-400">Acción</label>
                     <div className="flex rounded-md overflow-hidden border border-gray-300 dark:border-gray-600 text-sm font-medium">
                       <button
-                        onClick={() => updateOptionRow(row.id, 'side', 'sell')}
+                        disabled={isBaseRow} onClick={() => updateOptionRow(row.id, 'side', 'sell')}
                         className={`flex-1 py-1.5 transition-colors ${
                           row.side === 'sell'
                             ? 'bg-blue-600 text-white'
@@ -578,7 +453,7 @@ function Calculator() {
                         Vender
                       </button>
                       <button
-                        onClick={() => updateOptionRow(row.id, 'side', 'buy')}
+                        disabled={isBaseRow} onClick={() => updateOptionRow(row.id, 'side', 'buy')}
                         className={`flex-1 py-1.5 transition-colors ${
                           row.side === 'buy'
                             ? 'bg-orange-500 text-white'
@@ -591,7 +466,7 @@ function Calculator() {
                     <p className="text-xs mt-1 text-center">
                       {row.side === 'sell'
                         ? <span className="text-blue-600 dark:text-blue-400">{row.type === 'call' ? 'Covered Call' : 'Cash-Secured Put'}</span>
-                        : <span className="text-orange-500">{row.type === 'call' ? 'Buy Call (alcista)' : 'Buy Put (bajista/cobertura)'}</span>
+                        : <span className="text-orange-500">{isBaseRow ? 'Recompra para cerrar' : row.type === 'call' ? 'Buy Call (alcista)' : 'Buy Put (bajista/cobertura)'}</span>
                       }
                     </p>
                   </div>
@@ -600,7 +475,7 @@ function Calculator() {
                   <div>
                     <label className="md:hidden text-xs text-gray-500 dark:text-gray-400">Tipo</label>
                     <select
-                      value={row.type}
+                      disabled={isBaseRow} value={row.type}
                       onChange={e => updateOptionRow(row.id, 'type', e.target.value)}
                       className="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-md focus:outline-none focus:ring-1 focus:ring-green-500"
                     >
@@ -614,7 +489,7 @@ function Calculator() {
                     <label className="md:hidden text-xs text-gray-500 dark:text-gray-400">Strike</label>
                     <input
                       type="number"
-                      value={row.strike}
+                      disabled={isBaseRow} value={row.strike}
                       onChange={e => updateOptionRow(row.id, 'strike', e.target.value)}
                       placeholder="155.00"
                       step="0.5"
@@ -627,7 +502,7 @@ function Calculator() {
                     <label className="md:hidden text-xs text-gray-500 dark:text-gray-400">Vencimiento</label>
                     <input
                       type="date"
-                      value={row.expiration}
+                      disabled={isBaseRow} value={row.expiration}
                       onChange={e => updateOptionRow(row.id, 'expiration', e.target.value)}
                       className="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 rounded-md focus:outline-none focus:ring-1 focus:ring-green-500"
                     />
@@ -665,7 +540,7 @@ function Calculator() {
                     <label className="md:hidden text-xs text-gray-500 dark:text-gray-400">Contratos</label>
                     <input
                       type="number"
-                      value={row.contracts}
+                      disabled={isBaseRow} value={row.contracts}
                       onChange={e => updateOptionRow(row.id, 'contracts', e.target.value)}
                       min="1"
                       step="1"
@@ -675,7 +550,7 @@ function Calculator() {
 
                   {/* Remove */}
                   <div className="flex justify-end">
-                    {brokerOptionRows.length > 1 && (
+                    {brokerOptionRows.length > 1 && !isBaseRow && (
                       <button
                         onClick={() => removeOptionRow(row.id)}
                         className="text-red-500 hover:text-red-700 text-lg font-bold px-2"
@@ -690,7 +565,7 @@ function Calculator() {
             </div>
 
             <p className="mt-3 text-xs text-gray-400 dark:text-gray-500">
-              💡 La <strong>prima</strong> es el precio por acción que ves en la columna &ldquo;bid&rdquo;, &ldquo;ask&rdquo; o &ldquo;last&rdquo; de la cadena de opciones de tu broker (cada contrato = 100 acciones).
+              💡 La <strong>prima</strong> es el precio por acción que ves en la columna &ldquo;bid&rdquo; para vender o &ldquo;ask&rdquo; para comprar/cerrar de la cadena de opciones de tu broker (cada contrato = 100 acciones).
             </p>
           </div>
 
@@ -723,13 +598,13 @@ function Calculator() {
                       {rollOption && <th className="px-4 py-3 text-left text-xs font-medium text-green-600 dark:text-green-400 uppercase">Acción</th>}
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Ganancia máx.</th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Pérdida máx.</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">ROI Anualizado</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">{rollOption ? "Retorno neto del roll anualizado" : "Prima anualizada"}</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {validResults
                       .slice()
-                      .sort((a, b) => b.score - a.score)
+                      .sort((a, b) => (candidatesForBest.find(c => c.id === b.id)?.score ?? b.score) - (candidatesForBest.find(c => c.id === a.id)?.score ?? a.score))
                       .map((r) => {
                         const isBest = r.id === bestId
                         const isSell = r.side === 'sell'
@@ -747,12 +622,10 @@ function Calculator() {
                           if (isRollBase) {
                             rollCell = <td className="px-4 py-3 text-xs text-gray-400 dark:text-gray-500 italic">posición actual</td>
                           } else {
-                            // BTC cost = prima base × 100 × contratos + comisión (se paga al cerrar)
-                            const baseRow = validResults.find(vr => vr.id === rollBaseId)
-                            const commission = parseFloat(brokerCommission) || 0
-                            const btcCost = baseRow
-                              ? baseRow.premium * 100 * baseRow.contracts + commission * baseRow.contracts
-                              : rollOption.premium_per_contract * rollOption.contracts * 100 + commission * rollOption.contracts
+                            const btcCost = rollClosingCost
+                            if (btcCost === null) {
+                              rollCell = <td className="px-4 py-3 text-amber-600">Falta precio BTC</td>
+                            } else {
                             const netCredit = r.totalCashFlow - btcCost
                             const strikeChange = r.strike - rollOption.strike_price
                             rollCell = (
@@ -773,6 +646,7 @@ function Calculator() {
                                 )}
                               </td>
                             )
+                            }
                           }
                         }
 
@@ -792,7 +666,7 @@ function Calculator() {
                                 {isSell ? 'Vender' : 'Comprar'}
                               </span>
                               <span className={r.type === 'call' ? 'text-blue-600 dark:text-blue-400' : 'text-purple-600 dark:text-purple-400'}>
-                                {r.strategyName}
+                                {isRollBase ? 'Recompra para cerrar' : r.strategyName}
                               </span>
                             </td>
                             <td className="px-4 py-3 text-gray-900 dark:text-gray-100">
@@ -818,11 +692,10 @@ function Calculator() {
                               </span>
                               {/* Para filas candidato en modo roll: mostrar neto del roll */}
                               {rollOption && !isRollBase && (() => {
-                                const baseRow = validResults.find(vr => vr.id === rollBaseId)
-                                const commission = parseFloat(brokerCommission) || 0
-                                const btcCost = baseRow
-                                  ? baseRow.premium * 100 * baseRow.contracts + commission * baseRow.contracts
-                                  : rollOption.premium_per_contract * rollOption.contracts * 100 + commission * rollOption.contracts
+
+
+                                const btcCost = rollClosingCost
+                    if (btcCost === null) return <span className="text-amber-600">Ingresa el precio de recompra actual</span>
                                 const netRoll = r.totalCashFlow - btcCost
                                 return (
                                   <span className={`block text-xs font-semibold mt-0.5 ${netRoll >= 0 ? 'text-green-500' : 'text-red-400'}`}>
@@ -834,9 +707,9 @@ function Calculator() {
                             <td className="px-4 py-3">{otmLabel}</td>
                             <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
                               {/* Para Covered Call: dos valores */}
-                              {r.side === 'sell' && r.type === 'call' ? (
+                              {isRollBase || (rollOption && rollClosingCost === null) ? <span>—</span> : r.side === 'sell' && r.type === 'call' ? (
                                 <>
-                                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-0.5">Upside cap:</div>
+                                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-0.5">Punto de equilibrio:</div>
                                   <div className="font-medium">${r.breakeven.toFixed(2)}</div>
                                   <div className={`text-xs ${r.breakevenMovePct > 0 ? 'text-blue-400' : 'text-gray-400'}`}>
                                     {r.breakevenMovePct > 0 ? '+' : ''}{r.breakevenMovePct.toFixed(1)}% vs precio
@@ -845,7 +718,7 @@ function Calculator() {
                                     <>
                                       <div className="text-xs text-gray-500 dark:text-gray-400 mt-1.5 mb-0.5">Protección baja:</div>
                                       <div className="font-medium text-green-600 dark:text-green-400">${r.downsideProtection.toFixed(2)}</div>
-                                      <div className="text-xs text-green-500">−{r.downsideProtectionPct.toFixed(1)}% puede caer</div>
+                                      <div className="text-xs text-green-500">{r.downsideProtectionPct >= 0 ? `${r.downsideProtectionPct.toFixed(1)}% de margen` : `${Math.abs(r.downsideProtectionPct).toFixed(1)}% bajo equilibrio`}</div>
                                     </>
                                   )}
                                 </>
@@ -863,24 +736,24 @@ function Calculator() {
                             {rollOption && !isRollBase && (
                               <td className="px-4 py-3">
                                 <button
-                                  onClick={() => setRollConfirm(r)}
+                                  onClick={() => setRollConfirm(r)} disabled={rollClosingCost === null || r.side !== 'sell' || r.type !== rollOption.option_type.toLowerCase() || r.dte <= 0}
                                   className="px-3 py-1.5 text-xs font-semibold bg-green-600 hover:bg-green-700 text-white rounded-lg whitespace-nowrap"
                                 >
-                                  🔄 Ejecutar Roll
+                                  Registrar roll
                                 </button>
                               </td>
                             )}
                             {rollOption && isRollBase && <td className="px-4 py-3" />}
-                            <td className="px-4 py-3 text-green-600 dark:text-green-400 font-medium">
-                              {r.maxProfit === Infinity ? '∞ ilimitada' : `$${r.maxProfit.toFixed(2)}`}
+                            <td className={`px-4 py-3 font-medium ${r.maxProfit >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                              {isRollBase || (rollOption && rollClosingCost === null) ? '—' : r.maxProfit === Infinity ? '∞ ilimitada' : `$${r.maxProfit.toFixed(2)}`}
                             </td>
                             <td className="px-4 py-3 text-red-500 dark:text-red-400">
-                              ${r.maxLoss.toFixed(2)}
+                              {isRollBase || (rollOption && rollClosingCost === null) ? '—' : `$${r.maxLoss.toFixed(2)}`}
                             </td>
                             <td className="px-4 py-3 font-bold">
                               {isSell ? (
                                 <span className={r.annualizedRoiPct >= 20 ? 'text-green-600 dark:text-green-400' : r.annualizedRoiPct >= 10 ? 'text-blue-600 dark:text-blue-400' : 'text-gray-700 dark:text-gray-300'}>
-                                  {r.annualizedRoiPct.toFixed(1)}%
+                                  {(rollOption && !isRollBase ? candidatesForBest.find(c => c.id === r.id)?.score?.toFixed(1) ?? "—" : r.annualizedRoiPct.toFixed(1))}%
                                 </span>
                               ) : (
                                 <span className="text-xs text-gray-500 dark:text-gray-400 font-normal">
@@ -903,13 +776,13 @@ function Calculator() {
                   <span><strong>Vender Put</strong> (CSP): recibes prima, te comprometes a comprar al strike</span>
                   <span><strong>Comprar Call</strong>: pagas prima, ganas si el precio sube del breakeven</span>
                   <span><strong>Comprar Put</strong>: pagas prima, ganas si el precio baja / cobertura</span>
-                  <span><strong>Upside cap</strong>: precio desde el cual ya no ganas más (Covered Call)</span>
+                  <span><strong>Punto de equilibrio</strong>: precio al vencimiento donde la estrategia no gana ni pierde, incluyendo comisión</span>
                   <span><strong>Protección baja</strong>: hasta qué precio puede caer la acción antes de perder dinero neto</span>
                   <span><strong>Flujo de caja</strong>: + recibes, − pagas (por todos los contratos)</span>
                   <span><strong>OTM</strong>: fuera del dinero — para ventas significa que expira sin valor</span>
                   <span><strong>DTE</strong>: días hasta el vencimiento</span>
-                  <span><strong>Roll crédito neto</strong>: prima nueva − prima actual (positivo = roll por crédito)</span>
-                  <span><strong>ROI Anualizado</strong>: solo aplica para ventas (ingreso por tiempo)</span>
+                  <span><strong>Roll crédito neto</strong>: prima nueva − costo de recompra − comisiones (positivo = roll por crédito)</span>
+                  <span><strong>Prima anualizada</strong>: solo aplica para ventas (ingreso por tiempo)</span>
                   <span><strong>c/com.</strong>: flujo de caja ya incluye comisión del broker por contrato</span>
                 </div>
               </div>
@@ -919,13 +792,13 @@ function Calculator() {
           {/* ── PROYECCIÓN ANUAL (Wheel) ────────────────────────── */}
           {(() => {
             const sellResults = validResults.filter(r => r.side === 'sell' && r.id !== rollBaseId)
-            if (sellResults.length === 0 || !parseFloat(brokerStockPrice)) return null
+            if (rollOption || sellResults.length === 0 || !parseFloat(brokerStockPrice)) return null
             const best = candidatesForBest.length > 0
               ? candidatesForBest.filter(r => r.side === 'sell').reduce((a, b) => a.score > b.score ? a : b, candidatesForBest.filter(r => r.side === 'sell')[0])
               : sellResults[0]
             if (!best) return null
             const cyclesPerYear = best.dte > 0 ? 365 / best.dte : 0
-            const annualIncome = best.maxProfit * cyclesPerYear
+            const annualIncome = best.totalCashFlow * cyclesPerYear
             const capitalAtRisk = best.type === 'call'
               ? (parseFloat(brokerCostBasis) || parseFloat(brokerStockPrice)) * 100 * best.contracts
               : best.strike * 100 * best.contracts
@@ -933,7 +806,7 @@ function Calculator() {
             const monthlyIncome = annualIncome / 12
             const totalCycles = Math.floor(cyclesPerYear)
             let compoundedCapital = capitalAtRisk
-            for (let i = 0; i < totalCycles; i++) compoundedCapital += best.maxProfit
+            for (let i = 0; i < totalCycles; i++) compoundedCapital += best.totalCashFlow
             const compoundedGain = compoundedCapital - capitalAtRisk
             return (
               <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">

@@ -88,7 +88,7 @@ interface HoldingPosition {
   gross_cost: number | null
   premium_collected: number
   market_price: number
-  vs_cost_basis: number
+  vs_cost_basis: number | null
   quote_as_of: string
   candidates: HoldingCandidate[]
 }
@@ -229,6 +229,7 @@ export default function CoveredCalls() {
     try {
       const res = await api.get('/api/scanner/covered-calls/holdings')
       setHoldings(res.data.positions || [])
+      setError((res.data.errors || []).map((e: {ticker: string; error: string}) => `${e.ticker}: ${e.error}`).join(" · "))
     } catch (err: any) {
       setError(err?.response?.data?.detail || 'No se pudieron cargar las posiciones.')
     } finally {
@@ -471,7 +472,7 @@ export default function CoveredCalls() {
         </div>
       ) : candidates.length === 0 ? (
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-8 text-center text-gray-500 dark:text-gray-400">
-          Sin candidatos. Corre un escaneo o afloja los filtros.
+          Sin candidatos vigentes. Escanea nuevamente o revisa los filtros; se excluyen contratos vencidos y cotizaciones de más de 24 horas.
         </div>
       ) : (
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow overflow-hidden">
@@ -632,14 +633,14 @@ function HoldingsView({
     return (
       <div className="flex items-center justify-center gap-3 py-10">
         <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600" />
-        <span className="text-gray-600 dark:text-gray-300">Consultando cadenas en vivo...</span>
+        <span className="text-gray-600 dark:text-gray-300">Consultando cotizaciones diferidas de CBOE...</span>
       </div>
     )
   }
   if (!positions.length) {
     return (
       <div className="bg-white dark:bg-gray-800 rounded-xl shadow p-8 text-center text-gray-500 dark:text-gray-400">
-        No tienes posiciones de 100 acciones o más. Un covered call necesita al menos 100.
+        No hay bloques de 100 acciones disponibles para nuevas calls. Revisa las posiciones ya comprometidas y las liquidaciones pendientes.
       </div>
     )
   }
@@ -659,7 +660,7 @@ function HoldingsView({
             <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
               <h2 className="text-xl font-bold text-gray-900 dark:text-white">{p.ticker}</h2>
               <span className="text-sm text-gray-600 dark:text-gray-300">
-                {p.shares} acciones → <strong>{p.contracts} contratos</strong>
+                {p.shares} acciones → <strong>{p.contracts} contratos disponibles</strong>
                 {p.uncovered_shares > 0 && (
                   <span className="text-gray-400"> ({p.uncovered_shares} sin cubrir)</span>
                 )}
@@ -673,13 +674,13 @@ function HoldingsView({
                   <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">(bruto, sin ajuste por primas)</span>
                 )}
               </span>
-              <span className={`text-sm font-semibold ${p.vs_cost_basis >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                {p.vs_cost_basis >= 0 ? '+' : ''}{(p.vs_cost_basis * 100).toFixed(1)}% sobre tu costo
+              <span className={`text-sm font-semibold ${(p.vs_cost_basis ?? 0) >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {(p.vs_cost_basis ?? 0) >= 0 ? '+' : ''}{(p.vs_cost_basis == null ? '—' : (p.vs_cost_basis * 100).toFixed(1))}% sobre tu costo
               </span>
             </div>
             {p.gross_cost !== null && p.cost_basis_source === 'ADJUSTED' && (
               <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                Costo bruto {usd(p.gross_cost)} menos {usd(p.premium_collected, 0)} de primas cobradas en este ciclo.
+                Costo bruto {usd(p.gross_cost)} menos {usd(p.premium_collected, 0)} de primas realizadas netas de comisiones, distribuidas entre tus acciones.
                 Los strikes se comparan contra el costo real, que es lo que decide si te deja ganancia.
               </p>
             )}

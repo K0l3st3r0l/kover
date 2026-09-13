@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -225,6 +225,10 @@ def run(
             finally:
                 time.sleep(POLITE_DELAY_SECONDS)
 
+            quote_time = underlying.as_of.replace(tzinfo=timezone.utc) if underlying.as_of.tzinfo is None else underlying.as_of
+            if quote_time < datetime.now(timezone.utc) - timedelta(hours=24):
+                fallidos.append({"symbol": instrument.symbol, "error": "Cotización de más de 24 horas"})
+                continue
             if underlying.price is None or underlying.price <= 0:
                 fallidos.append({"symbol": instrument.symbol, "error": "CBOE no reportó precio del subyacente"})
                 continue
@@ -249,6 +253,10 @@ def run(
             metrics.cc_score_components = [c.as_dict() for c in resultado.components]
 
         # ── Fase 3: elegir los tres por papel y persistir ──────────────────
+        # Replace one complete ranking atomically; old runs are not peers of this population.
+        for previous in db.query(CoveredCallCandidate).all():
+            db.delete(previous)
+        db.flush()
         instrumentos_por_id = {i.id: i for i in objetivos}
         con_candidatos = 0
         for instrument_id, (candidatos, quote_as_of) in por_simbolo.items():
@@ -302,7 +310,6 @@ def run(
                 db.delete(fila)
 
             con_candidatos += 1
-            db.commit()
 
         resumen = {
             "started_at": datetime.now(timezone.utc).isoformat(),

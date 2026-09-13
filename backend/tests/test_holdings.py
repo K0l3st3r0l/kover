@@ -23,6 +23,8 @@ class FakeStock:
 
 
 def metrics(**overrides):
+    if "bid" in overrides and "ask" not in overrides:
+        overrides["ask"] = overrides["bid"] + 0.02
     return compute_covered_call(make_quote(**overrides), 14.0, 14.0, HOY)
 
 

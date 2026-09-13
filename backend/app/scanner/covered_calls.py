@@ -193,6 +193,10 @@ def compute_covered_call(
     """
     if quote.right != "C":
         return None
+    if quote.multiplier != CONTRACT_MULTIPLIER:
+        return None
+    if quote.ask is None or quote.bid is None or quote.ask < quote.bid:
+        return None
     if quote.bid is None or quote.bid <= 0:
         return None  # sin bid no hay a quién venderle: no es una oportunidad
     if underlying_price is None or underlying_price <= 0:
