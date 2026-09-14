@@ -175,7 +175,7 @@ async def get_performance_metrics(
             running_cost[ticker] = max(0.0, running_cost[ticker] - cost_basis)
             running_qty[ticker] = max(0.0, running_qty[ticker] - qty)
 
-    total_commissions = sum(abs(float(tx.commission or 0.0)) for tx in all_txns)
+    total_commissions = sum(float(tx.commission or 0.0) for tx in all_txns)
     dividends = sum(
         float(tx.total_amount or 0.0)
         for tx in all_txns
@@ -640,7 +640,7 @@ async def get_advanced_metrics(
                 continue
             qty = txn.quantity or 0
             proceeds = abs(txn.total_amount or 0)
-            commission = abs(txn.commission or 0)
+            commission = txn.commission or 0
             if running_qty[ticker] > 0:
                 avg_cost = running_cost[ticker] / running_qty[ticker]
                 cost_basis = avg_cost * min(qty, running_qty[ticker])
@@ -911,7 +911,7 @@ async def get_covered_call_cycles(
         abs(tx.total_amount or 0.0) if tx.transaction_type.value in SELL_TYPES else -abs(tx.total_amount or 0.0)
         for tx in option_transactions
     )
-    transaction_commissions = sum(abs(tx.commission or 0.0) for tx in option_transactions)
+    transaction_commissions = sum(tx.commission or 0.0 for tx in option_transactions)
     raw_option_net_premium = sum(c["raw_option_net_premium"] for c in cycles)
     unmatched_transaction_ids = option_ledger["unmatched_transaction_ids"]
     ambiguous_option_ids = option_ledger["ambiguous_option_ids"]

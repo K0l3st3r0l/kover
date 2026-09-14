@@ -84,7 +84,7 @@ def get_dashboard_summary(
             _running_shares[tx.ticker] = max(0.0, _running_shares[tx.ticker] - qty)
             _running_cost[tx.ticker] = max(0.0, _running_cost[tx.ticker] - cost_basis)
 
-    total_commissions = sum(abs(float(tx.commission or 0.0)) for tx in all_txs_ordered)
+    total_commissions = sum(float(tx.commission or 0.0) for tx in all_txs_ordered)
     dividends = sum(
         float(tx.total_amount or 0.0)
         for tx in all_txs_ordered

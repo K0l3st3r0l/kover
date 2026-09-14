@@ -117,6 +117,15 @@ class TestDetectAssignment:
 
 
 class TestPlanCampaigns:
+    def test_stock_commission_rebate_keeps_its_sign(self):
+        txs = [
+            tx(1, "F", TransactionType.BUY_STOCK, 100, 10, 1000, dt(2026, 1, 5), 1),
+            tx(2, "F", TransactionType.SELL_STOCK, 100, 12, 1200, dt(2026, 3, 1), -0.25),
+        ]
+        plan = plan_campaigns(txs, [], empty_ledger([]))[0]
+        assert plan.stock_commissions == 0.75
+        assert plan.stock_realized_pnl == 200
+
     def test_simple_campaign_buy_sell(self):
         txs = [
             tx(1, "F", TransactionType.BUY_STOCK, 100, 10.0, 1000.0, dt(2026, 1, 5), 1.0),

@@ -91,7 +91,8 @@ def describe_transaction(transaction: Any) -> dict[str, Any]:
         "transaction_type": transaction_type,
         "side": 1 if transaction_type in SELL_TYPES else -1,
         "amount": abs(float(_value(transaction, "total_amount", 0.0) or 0.0)),
-        "commission": abs(float(_value(transaction, "commission", 0.0) or 0.0)),
+        # Imports store costs as positive and broker rebates as negative.
+        "commission": float(_value(transaction, "commission", 0.0) or 0.0),
         "quantity": abs(float(_value(transaction, "quantity", 0.0) or 0.0)),
         "date": _as_date(_value(transaction, "transaction_date")),
         "strike": strike,

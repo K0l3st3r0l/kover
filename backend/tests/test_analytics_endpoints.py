@@ -135,6 +135,25 @@ class AnalyticsEndpointTests(unittest.TestCase):
         self.assertEqual(metrics["ledger_status"], "RECONCILED")
         self.assertFalse(metrics["roi_net_total_is_portfolio_return"])
 
+    def test_commission_rebate_reduces_costs_across_views(self):
+        self.db.get(Transaction, 127).commission = -0.5
+        self.db.commit()
+        cycles = asyncio.run(get_covered_call_cycles(db=self.db, current_user=self.user))
+        closed = next(c for c in cycles["cycles"] if c["strike_price"] == 11)
+        self.assertEqual(closed["commissions"], 1.95)
+        self.assertEqual(closed["net_premium_net_of_fees"], -18.95)
+        self.assertEqual(cycles["summary"]["total_commissions"], 3.35)
+        self.assertEqual(cycles["summary"]["transaction_commissions"], 3.35)
+        with patch("app.api.dashboard.MarketDataService.get_multiple_prices", return_value={}), patch(
+            "app.api.analytics.MarketDataService.get_current_price", return_value=None
+        ):
+            dashboard = get_dashboard_summary(db=self.db, current_user=self.user)
+            metrics = asyncio.run(get_performance_metrics(db=self.db, current_user=self.user))
+        self.assertEqual(dashboard["option_commissions"], 3.35)
+        self.assertEqual(dashboard["commissions"], 3.35)
+        self.assertEqual(dashboard["total_pnl"], -20.35)
+        self.assertEqual(metrics["commissions"], 3.35)
+
 
 if __name__ == "__main__":
     unittest.main()

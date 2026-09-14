@@ -240,7 +240,7 @@ def plan_campaigns(
         tt = tx.transaction_type
         qty = float(tx.quantity or 0.0)
         amount = float(tx.total_amount or 0.0)
-        commission = abs(float(tx.commission or 0.0))
+        commission = float(tx.commission or 0.0)
 
         if tt == TransactionType.BUY_STOCK:
             current = open_by_ticker.get(ticker)
