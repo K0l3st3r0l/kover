@@ -79,15 +79,15 @@ CARTERA_REQUEST_DELAY = 1.5    # seg entre requests (sitio gubernamental, conser
 CARTERA_MAX_MONTHS_BACK = 4    # la publicación tiene rezago de ~1-2 meses
 
 # -- Comité de IA multi-modelo (OpenRouter) -----------------------------------
-# Analistas: GPT-5.6 Luna max + DeepSeek V4 Pro 0813 max.
-# Árbitro: GLM 5.3 Flash max. Ver wiki/projects/kover/decisions/ai-committee-afp.md
+# Analistas: GPT-5.6 Luna max + DeepSeek V4.1 Flash max.
+# Árbitro: MiMo V2.6 Pro. Ver wiki/projects/kover/decisions/ai-committee-afp.md
 AI_API_URL = os.getenv("AI_API_URL", "https://openrouter.ai/api/v1").rstrip("/")
 AI_API_KEY = os.getenv("OPENROUTER_API_KEY") or os.getenv("AI_API_KEY", "")
 AI_HTTP_REFERER = os.getenv("AI_HTTP_REFERER", "https://kover.laravas.com")
 AI_APP_TITLE = os.getenv("AI_APP_TITLE", "Kover AFP Committee")
 
-AI_ANALYST_MODELS = ["openai/gpt-5.6-luna", "deepseek/deepseek-v4-pro-0813"]
-AI_ARBITER_MODEL = "z-ai/glm-5.3-flash"
+AI_ANALYST_MODELS = ["openai/gpt-5.6-luna", "deepseek/deepseek-v4.1-flash"]
+AI_ARBITER_MODEL = "xiaomi/mimo-v2.6-pro"
 AI_REASONING_EFFORT = "max"
 AI_INVESTMENT_HORIZON_YEARS = 15
 AI_CALL_TIMEOUT_SECONDS = 600
@@ -593,8 +593,8 @@ def get_afp_funds(
 
 
 # -- Comité de IA multi-modelo -------------------------------------------------
-# Dos analistas (deepseek-v4-pro, minimax-m3) analizan los mismos datos en
-# paralelo y un árbitro independiente (glm-5.1) contrasta ambos veredictos y
+# Dos analistas (gpt-5.6-luna, deepseek-v4.1-flash) analizan los mismos datos en
+# paralelo y un árbitro independiente (mimo-v2.6-pro) contrasta ambos veredictos y
 # emite una decisión final. Restricción dura: máximo 2 fondos, igual que la
 # distribución sugerida basada en reglas del frontend.
 

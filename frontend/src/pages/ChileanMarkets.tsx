@@ -64,6 +64,9 @@ const FUND_NAMES: Record<string, string> = {
 function committeeModelLabel(id: string) {
   if (!id) return id
   if (id.includes('gpt-5.6-luna')) return 'GPT-5.6 Luna'
+  if (id.includes('deepseek-v4.1-flash')) return 'DeepSeek V4.1 Flash'
+  if (id.includes('mimo-v2.6-pro')) return 'MiMo V2.6 Pro'
+  // Modelos ya retirados: el track record histórico sigue mostrando sus corridas.
   if (id.includes('deepseek-v4-pro')) return 'DeepSeek V4 Pro'
   if (id.includes('glm-5.3-flash')) return 'GLM 5.3 Flash'
   if (id.includes('minimax')) return 'MiniMax'
@@ -1264,7 +1267,7 @@ export default function ChileanMarkets() {
               🤖 Comité de IA Multi-Modelo
             </h2>
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-              Dos analistas (GPT-5.6 Luna, DeepSeek V4 Pro) analizan los datos en paralelo y un árbitro independiente (GLM 5.3 Flash) contrasta ambos veredictos.
+              Dos analistas (GPT-5.6 Luna, DeepSeek V4.1 Flash) analizan los datos en paralelo y un árbitro independiente (MiMo V2.6 Pro) contrasta ambos veredictos.
               {aiCommittee.generated_at && ` Generado: ${new Date(aiCommittee.generated_at).toLocaleString('es-CL')}.`}
             </p>
           </div>

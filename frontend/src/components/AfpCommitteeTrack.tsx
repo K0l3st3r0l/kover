@@ -32,6 +32,8 @@ const FUND_NAMES: Record<string, string> = {
 function modelLabel(id: string) {
   if (!id) return '—'
   if (id.includes('gpt-5.6-luna')) return 'Luna'
+  if (id.includes('deepseek-v4.1-flash')) return 'DeepSeek V4.1'
+  if (id.includes('mimo-v2.6-pro')) return 'MiMo V2.6 Pro'
   if (id.includes('deepseek-v4-pro')) return 'DeepSeek'
   if (id.includes('glm-5.3-flash')) return 'GLM 5.3 Flash'
   if (id.includes('glm-5.1')) return 'GLM 5.1'
