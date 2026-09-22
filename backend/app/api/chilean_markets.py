@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -138,6 +139,43 @@ def _load_afp_cache(fund: str) -> list:
         return []
 
 
+def _drop_partial_rows(records: list) -> list:
+    """
+    Drop rows where only some AFPs have reported yet.
+
+    The SP feed publishes the newest date before every AFP has filed, and the
+    stragglers take more than a day. Averaging a partial set is not a partial
+    answer: each AFP carries its own historical cuota base (fund C: PlanVital
+    143.757 vs Provida 68.637), so a day with one AFP left the average 67% off
+    with no market move behind it.
+
+    Rows are grouped by how many AFP columns their block has, so the 6-AFP era
+    (before AFP UNO joined on 2019-10-01) is not judged against the 7-AFP one.
+    Records with no count — old cache files — are kept as-is.
+    """
+    by_shape: dict[int, list] = {}
+    for r in records:
+        by_shape.setdefault(r.get("n_slots", 0), []).append(r)
+
+    kept = []
+    for rows in by_shape.values():
+        counts = [r["n_afp"] for r in rows if r.get("n_afp")]
+        if not counts:
+            kept.extend(rows)
+            continue
+        expected = Counter(counts).most_common(1)[0][0]
+        for r in rows:
+            n = r.get("n_afp")
+            if n is None or n >= expected:
+                kept.append(r)
+            else:
+                logger.info(
+                    "Dropping partial AFP row %s: %d/%d AFP reported",
+                    r["date_str"], n, expected,
+                )
+    return sorted(kept, key=lambda x: x["date"])
+
+
 def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
     """
     Fetch CSV from SP and return list of {date, avg_value} sorted ascending.
@@ -189,7 +227,9 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
 
             cuotas = []
             patrimonios = []
+            n_slots = 0
             for i in range(1, len(parts), 2):
+                n_slots += 1
                 val = _parse_cl_number(parts[i])
                 if val is not None and val > 0:
                     cuotas.append(val)
@@ -204,13 +244,18 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
                     "date_str": date.strftime("%Y-%m-%d"),
                     "avg_value": sum(cuotas) / len(cuotas),
                     "total_patrimonio": sum(patrimonios) if patrimonios else 0.0,
+                    "n_afp": len(cuotas),
+                    "n_slots": n_slots,
                 })
 
         records.sort(key=lambda x: x["date"])
         seen = {}
         for r in records:
-            seen[r["date_str"]] = r
-        records = sorted(seen.values(), key=lambda x: x["date"])
+            prev = seen.get(r["date_str"])
+            # The feed repeats years in separate blocks; keep the fullest row.
+            if prev is None or r.get("n_afp", 0) >= prev.get("n_afp", 0):
+                seen[r["date_str"]] = r
+        records = _drop_partial_rows(sorted(seen.values(), key=lambda x: x["date"]))
 
         if records:
             _save_afp_cache(fund, records)
@@ -219,7 +264,7 @@ def _fetch_fund_data(fund: str, year_start: int, year_end: int) -> list:
     cached = _load_afp_cache(fund)
     if cached:
         logger.info(f"Serving fund {fund} from disk cache (source unavailable)")
-        return cached, True
+        return _drop_partial_rows(cached), True
 
     return [], False
 
